@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AssessVox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #000000;
+      --panel:     #0a0a0c;
+      --panel-2:   #111114;
+      --panel-3:   #16171b;
+      --border:    #1f2025;
+      --border-2:  #2a2c33;
+      --text:      #e6e6ea;
+      --muted:     #6b6d75;
+      --muted-2:   #9a9ca5;
+      --accent:    #8aa2e8;        /* iridescent blue */
+      --accent-2:  #b8a7e0;        /* iridescent lavender */
+      --good:      #7ec99a;
+      --warn:      #d4a574;
+      --bad:       #e07070;
+      --live:      #e85a5a;
+    }
+    [data-theme="light"] {
+      --bg:        #fafafa;
+      --panel:     #ffffff;
+      --panel-2:   #f3f4f7;
+      --panel-3:   #e9eaef;
+      --border:    #e1e2e7;
+      --border-2:  #cdcfd6;
+      --text:      #18181c;
+      --muted:     #8b8d96;
+      --muted-2:   #55575f;
+      --accent:    #4659c5;        /* deeper blue for contrast */
+      --accent-2:  #7a5fc8;        /* deeper lavender */
+      --good:      #2f8f5b;
+      --warn:      #b5772a;
+      --bad:       #c63838;
+      --live:      #d83a3a;
+    }
+    [data-theme="light"] .orb {
+      box-shadow:
+        0 0 50px rgba(70, 89, 197, 0.20),
+        inset 0 0 50px rgba(255, 255, 255, 0.35),
+        inset 0 0 20px rgba(255, 255, 255, 0.25);
+    }
+    [data-theme="light"] button.primary { color: #ffffff; }
+    [data-theme="light"] button.primary:hover:not(:disabled) { color: #ffffff; }
+    [data-theme="light"] .call-btn { color: #ffffff; }
+    [data-theme="light"] .call-btn:hover:not(:disabled) { color: #ffffff; }
+    [data-theme="light"] .call-btn.live { color: #ffffff; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'JetBrains Mono', ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 13px; line-height: 1.5;
+      letter-spacing: 0.2px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── Layout ────────────────────────────────────────────────────────── */
+    header {
+      padding: 14px 22px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 14px;
+      background: var(--bg);
+    }
+    header h1 {
+      margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1.5px;
+    }
+    header .tag {
+      font-size: 10px; padding: 3px 8px;
+      border: 1px solid var(--border-2); color: var(--muted-2);
+      letter-spacing: 1px;
+    }
+    header .status { margin-left: auto; font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+    header .theme-toggle {
+      background: var(--panel-2); color: var(--muted-2);
+      border: 1px solid var(--border-2); border-radius: 999px;
+      padding: 5px 12px; font-family: inherit; font-size: 10px;
+      letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      margin-left: 14px; transition: all 0.15s;
+    }
+    header .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+    header .theme-toggle svg { width: 12px; height: 12px; }
+    header .status.live  { color: var(--good); }
+    header .status.err   { color: var(--bad);  }
+
+    main {
+      display: grid; grid-template-columns: 360px 1fr 400px;
+      height: calc(100vh - 51px); gap: 14px; padding: 14px;
+      background: var(--bg);
+    }
+    .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 16px; overflow: auto;
+    }
+    .card h2 {
+      margin: 0 0 12px; font-size: 11px; letter-spacing: 1.8px;
+      color: var(--muted-2); font-weight: 600; text-transform: uppercase;
+    }
+    .card .sub {
+      font-size: 10px; color: var(--muted); margin-top: -8px; margin-bottom: 12px;
+      letter-spacing: 0.8px;
+    }
+    .col-grow { flex: 1; min-height: 0; }
+
+    /* ─── Form ─────────────────────────────────────────────────────────── */
+    label {
+      display: block; font-size: 10px; color: var(--muted-2);
+      letter-spacing: 1.5px; text-transform: uppercase;
+      margin: 14px 0 6px;
+    }
+    label .req { color: var(--bad); }
+    textarea, input[type="number"], input[type="text"] {
+      width: 100%; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border-2); border-radius: 6px;
+      padding: 10px 12px; font-family: inherit; font-size: 12px;
+      letter-spacing: 0.3px; outline: none;
+      transition: border-color 0.15s;
+    }
+    textarea:focus, input:focus { border-color: var(--accent); }
+    textarea { min-height: 70px; resize: vertical; }
+    textarea.adv { min-height: 240px; font-size: 10.5px; line-height: 1.5; }
+
+    button {
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border-2); border-radius: 6px;
+      padding: 9px 14px; font-family: inherit; font-size: 11px;
+      letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer;
+      transition: all 0.15s; font-weight: 500;
+    }
+    button:hover:not(:disabled) {
+      border-color: var(--accent); color: var(--accent);
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary {
+      background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600;
+    }
+    button.primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+    button.danger { color: var(--bad); border-color: var(--bad); }
+    button.danger:hover:not(:disabled) { background: var(--bad); color: var(--bg); }
+
+    details summary {
+      cursor: pointer; padding: 8px 0; font-size: 10px; color: var(--muted-2);
+      letter-spacing: 1.5px; text-transform: uppercase; user-select: none;
+    }
+    details summary:hover { color: var(--text); }
+    .btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+    /* ─── Flow preview ─────────────────────────────────────────────────── */
+    .probe {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+    }
+    .probe .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .probe .type {
+      font-size: 9px; padding: 2px 7px; border: 1px solid var(--border-2);
+      color: var(--accent); letter-spacing: 1px; text-transform: uppercase;
+    }
+    .probe .id { font-size: 11px; color: var(--text); font-weight: 600; }
+    .probe .star { font-size: 10px; color: var(--good); margin-left: auto; letter-spacing: 1px; }
+    .probe .prompt { font-size: 11px; color: var(--muted-2); line-height: 1.5; }
+    .probe .scaffold { font-size: 10.5px; color: var(--muted); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+
+    /* ─── Middle — orb + state ─────────────────────────────────────────── */
+    .center-card {
+      display: flex; flex-direction: column;
+      align-items: center; padding: 20px 16px 18px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      position: relative; overflow: hidden;
+    }
+    .title-block { text-align: center; margin-bottom: 14px; }
+    .title-block .name { font-size: 14px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
+    .title-block .hint { font-size: 10px; color: var(--muted-2); margin-top: 4px; letter-spacing: 1.2px; }
+
+    /* Orb */
+    .orb-wrap { position: relative; width: 140px; height: 140px; margin-bottom: 16px; }
+    .orb {
+      position: absolute; inset: 0; border-radius: 50%;
+      background: conic-gradient(from 0deg,
+        #4a6dbf 0%, #7a8edc 12%, #b8a7e0 25%, #6a82c8 38%,
+        #4a6dbf 50%, #8aa2e8 62%, #c4a8e8 75%, #5470c4 88%, #4a6dbf 100%);
+      filter: blur(1.5px) saturate(1.3);
+      box-shadow:
+        0 0 50px rgba(138, 162, 232, 0.25),
+        inset 0 0 50px rgba(0, 0, 0, 0.7),
+        inset 0 0 20px rgba(0, 0, 0, 0.9);
+      animation: orb-rotate 28s linear infinite;
+    }
+    .orb::after {
+      content: ''; position: absolute; inset: 8%;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,0.18), transparent 60%);
+      pointer-events: none;
+    }
+    .orb-wrap.listening .orb { animation-duration: 12s; box-shadow: 0 0 70px rgba(138,162,232,0.45), inset 0 0 50px rgba(0,0,0,0.7); }
+    .orb-wrap.talking .orb { animation-duration: 6s; box-shadow: 0 0 90px rgba(184,167,224,0.55), inset 0 0 50px rgba(0,0,0,0.6); }
+    .orb-wrap.idle .orb { animation-duration: 60s; filter: blur(2px) saturate(0.7) brightness(0.55); }
+    @keyframes orb-rotate { to { transform: rotate(360deg); } }
+
+    /* State pills */
+    .state-pills { display: flex; gap: 8px; margin-bottom: 22px; }
+    .pill {
+      font-size: 10px; padding: 5px 12px; letter-spacing: 1.5px;
+      text-transform: uppercase; border: 1px solid var(--border-2);
+      color: var(--muted); border-radius: 4px; transition: all 0.2s;
+    }
+    .pill.active { color: var(--accent); border-color: var(--accent); background: rgba(138,162,232,0.05); }
+
+    /* Thinking bars */
+    .thinking { display: flex; gap: 3px; align-items: center; height: 24px; margin-bottom: 14px; opacity: 0; transition: opacity 0.3s; }
+    .thinking.on { opacity: 1; }
+    .thinking span {
+      width: 3px; background: var(--muted-2); border-radius: 1px;
+      animation: thinking-bar 1.4s ease-in-out infinite;
+    }
+    .thinking span:nth-child(1)  { animation-delay: -1.4s; height: 30%; }
+    .thinking span:nth-child(2)  { animation-delay: -1.3s; height: 50%; }
+    .thinking span:nth-child(3)  { animation-delay: -1.2s; height: 70%; }
+    .thinking span:nth-child(4)  { animation-delay: -1.1s; height: 80%; }
+    .thinking span:nth-child(5)  { animation-delay: -1.0s; height: 60%; }
+    .thinking span:nth-child(6)  { animation-delay: -0.9s; height: 45%; }
+    .thinking span:nth-child(7)  { animation-delay: -0.8s; height: 65%; }
+    .thinking span:nth-child(8)  { animation-delay: -0.7s; height: 80%; }
+    .thinking span:nth-child(9)  { animation-delay: -0.6s; height: 60%; }
+    .thinking span:nth-child(10) { animation-delay: -0.5s; height: 40%; }
+    .thinking span:nth-child(11) { animation-delay: -0.4s; height: 55%; }
+    .thinking span:nth-child(12) { animation-delay: -0.3s; height: 30%; }
+    @keyframes thinking-bar {
+      0%, 100% { transform: scaleY(0.4); opacity: 0.4; }
+      50%      { transform: scaleY(1.0); opacity: 1.0; }
+    }
+
+    /* Main call button — pill with label, big and obvious */
+    .call-btn {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 28px; border-radius: 999px;
+      background: var(--text); color: var(--bg);
+      border: 1px solid var(--text);
+      font-family: inherit; font-size: 12px; font-weight: 700;
+      letter-spacing: 2px; text-transform: uppercase;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .call-btn svg { width: 16px; height: 16px; }
+    .call-btn:hover:not(:disabled) {
+      background: var(--accent); border-color: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(138,162,232,0.35);
+    }
+    .call-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+    .call-btn.ready { animation: ready-pulse 2.4s ease-in-out infinite; }
+    @keyframes ready-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(230,230,234,0.4); }
+      50%      { box-shadow: 0 0 0 14px rgba(230,230,234,0); }
+    }
+    .call-btn.live {
+      background: var(--bad); color: white; border-color: var(--bad);
+      animation: live-pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes live-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(224,112,112,0.5); }
+      50%      { box-shadow: 0 0 0 18px rgba(224,112,112,0); }
+    }
+
+    /* ─── Waveform ─────────────────────────────────────────────────────── */
+    .waveform-card { padding: 14px 16px; }
+    .waveform-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .waveform-head .label { font-size: 10px; color: var(--muted-2); letter-spacing: 1.5px; text-transform: uppercase; }
+    .waveform-head .live-dot { font-size: 10px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+    .waveform-head .live-dot::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+    .waveform-head .live-dot.live { color: var(--live); }
+    .waveform-head .live-dot.live::before { background: var(--live); animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+
+    .waveform {
+      display: flex; gap: 2px; align-items: center; height: 80px;
+      background: var(--panel-2); border-radius: 4px; padding: 0 12px;
+    }
+    .waveform .bar {
+      flex: 1; background: var(--text); border-radius: 1px;
+      min-height: 2px; transition: height 0.05s;
+    }
+    .waveform.muted .bar { background: var(--muted); height: 4px !important; }
+
+    /* ─── Transcript log ───────────────────────────────────────────────── */
+    .log-card { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; }
+    .log-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .log-head h2 { margin: 0; }
+    .log-head .live-tag {
+      font-size: 9px; padding: 2px 8px; border-radius: 3px; letter-spacing: 1.2px;
+      color: var(--muted); border: 1px solid var(--border-2);
+    }
+    .log-head .live-tag.live { color: var(--live); border-color: var(--live); animation: blink 1.4s ease-in-out infinite; }
+    .log { flex: 1; overflow-y: auto; padding-top: 4px; }
+    .turn { margin-bottom: 14px; animation: fadein 0.3s ease-out; }
+    @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .turn .who { font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; color: var(--muted); }
+    .turn .who.student  { color: var(--accent); }
+    .turn .who.examiner { color: var(--accent-2); }
+    .turn .what { font-size: 12px; color: var(--text); line-height: 1.55; }
+    .turn.partial .what { color: var(--muted-2); font-style: italic; }
+    .empty {
+      color: var(--muted); text-align: center; font-size: 11px;
+      letter-spacing: 1px; padding: 30px 12px; line-height: 1.7;
+    }
+
+    /* ─── Report ───────────────────────────────────────────────────────── */
+    .overall {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 18px; text-align: center; margin-bottom: 12px;
+    }
+    .overall .num {
+      font-size: 44px; font-weight: 700; color: var(--text);
+      letter-spacing: -1px; line-height: 1;
+    }
+    .overall .num.sub { font-size: 14px; color: var(--muted); }
+    .overall .lab { font-size: 10px; color: var(--muted-2); letter-spacing: 1.5px; text-transform: uppercase; margin-top: 6px; }
+    .overall .headline { font-size: 12px; margin-top: 14px; line-height: 1.5; color: var(--text); }
+    .overall .summary { font-size: 11px; margin-top: 8px; color: var(--muted-2); line-height: 1.55; }
+
+    .dim {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px; margin-bottom: 8px;
+    }
+    .dim .head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+    .dim .label { font-size: 11px; font-weight: 600; }
+    .dim .score { margin-left: auto; font-size: 16px; font-weight: 700; }
+    .dim .score .max { color: var(--muted); font-size: 10px; font-weight: 400; }
+    .dim .bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 8px; }
+    .dim .bar > div { height: 100%; background: var(--accent); transition: width 0.5s; }
+    .dim .analysis { font-size: 11px; color: var(--text); line-height: 1.55; }
+    .dim .evidence { font-size: 10px; color: var(--muted); margin-top: 6px; font-style: italic; line-height: 1.55; }
+
+    .section { margin-bottom: 12px; }
+    .section h3 { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted-2); margin: 12px 0 6px; }
+    .section ul { margin: 0; padding-left: 16px; font-size: 11px; line-height: 1.6; }
+    .section li { margin-bottom: 3px; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ASSESSVOX</h1>
+    <span class="tag">LLM-GENERATED ORAL EXAM</span>
+    <span id="status" class="status">IDLE</span>
+    <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">
+      <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
+      <span id="theme-label">DARK</span>
+    </button>
+  </header>
+
+  <main>
+    <!-- ════════ LEFT ════════ -->
+    <section class="col">
+      <div class="card col-grow">
+        <h2>Exam Setup</h2>
+        <div class="sub">Define the question. LLM designs the probe graph.</div>
+
+        <label>Question / Topic <span class="req">*</span></label>
+        <textarea id="question" placeholder="e.g. Should AI replace teachers in schools?"></textarea>
+
+        <label>Duration (minutes)</label>
+        <input id="duration" type="number" min="2" max="20" value="6" />
+
+        <details id="adv-toggle">
+          <summary>Advanced — Grading Prompt</summary>
+          <label>Custom Grading Prompt</label>
+          <textarea id="grading-prompt" class="adv" placeholder="loading default..."></textarea>
+          <div class="btn-row">
+            <button id="reset-prompt">Reset Default</button>
+          </div>
+        </details>
+
+        <div class="btn-row" style="margin-top: 16px;">
+          <button class="primary" id="generate-btn">Generate Flow</button>
+        </div>
+
+        <div id="flow-preview" style="margin-top: 18px;"></div>
+      </div>
+    </section>
+
+    <!-- ════════ MIDDLE (orb + conversation) ════════ -->
+    <section class="col">
+      <div class="center-card">
+        <div class="title-block">
+          <div class="name">AssessVox Examiner</div>
+          <div class="hint" id="hint-text">Tap to start voice chat</div>
+        </div>
+
+        <div class="orb-wrap idle" id="orb-wrap">
+          <div class="orb"></div>
+        </div>
+
+        <div class="state-pills" id="state-pills">
+          <span class="pill active" data-state="idle">Idle</span>
+          <span class="pill" data-state="listening">Listening</span>
+          <span class="pill" data-state="talking">Talking</span>
+        </div>
+
+        <div class="thinking" id="thinking">
+          <span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span>
+        </div>
+
+        <button class="call-btn" id="call-btn" disabled title="Generate a flow first">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+          </svg>
+          <span id="call-btn-label">Start Exam</span>
+        </button>
+      </div>
+
+      <div class="card log-card col-grow">
+        <div class="log-head">
+          <h2>Conversation</h2>
+          <span class="live-tag" id="log-live">offline</span>
+        </div>
+        <div class="log" id="log">
+          <div class="empty">
+            Generate a flow on the left,<br>then start the exam to see the live transcript here.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ════════ RIGHT (waveform + report) ════════ -->
+    <section class="col">
+      <div class="card waveform-card">
+        <div class="waveform-head">
+          <span class="label">Live Stream</span>
+          <span class="live-dot" id="live-dot">Offline</span>
+        </div>
+        <div class="waveform muted" id="waveform">
+          <!-- 48 bars injected by JS -->
+        </div>
+      </div>
+
+      <div class="card col-grow" id="report-card">
+        <h2>Grading Report</h2>
+        <div id="report-area">
+          <div class="empty">
+            Report appears here<br>after the exam ends.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  // ─── Theme toggle ───────────────────────────────────────────────────────
+  const SUN_ICON = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>';
+  const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const isLight = theme === 'light';
+    document.getElementById('theme-icon').innerHTML = isLight ? MOON_ICON : SUN_ICON;
+    document.getElementById('theme-label').textContent = isLight ? 'LIGHT' : 'DARK';
+    try { localStorage.setItem('assessvox-theme', theme); } catch {}
+  }
+  (() => {
+    let saved = null;
+    try { saved = localStorage.getItem('assessvox-theme'); } catch {}
+    applyTheme(saved === 'light' ? 'light' : 'dark');
+  })();
+  document.getElementById('theme-toggle').onclick = () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+  };
+
+  // ─── State ──────────────────────────────────────────────────────────────
+  let sessionId = null;
+  let pc = null;
+  let audioEl = null;
+  let micStream = null;
+  let reportPoller = null;
+  let audioCtx = null;
+  let analyser = null;
+  let waveformRAF = null;
+
+  // ─── Build waveform bars ────────────────────────────────────────────────
+  const wf = document.getElementById('waveform');
+  const NUM_BARS = 48;
+  for (let i = 0; i < NUM_BARS; i++) {
+    const b = document.createElement('div');
+    b.className = 'bar';
+    wf.appendChild(b);
+  }
+  const bars = wf.querySelectorAll('.bar');
+
+  // ─── Helpers ────────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const setStatus = (txt, cls = '') => {
+    const el = $('status');
+    el.textContent = txt.toUpperCase();
+    el.className = 'status ' + cls;
+  };
+  const setOrbState = (state) => {
+    $('orb-wrap').className = 'orb-wrap ' + state;
+    document.querySelectorAll('.pill').forEach(p =>
+      p.classList.toggle('active', p.dataset.state === state)
+    );
+  };
+  const setThinking = (on) => $('thinking').classList.toggle('on', on);
+  const setLive = (on) => {
+    const d = $('live-dot');
+    d.classList.toggle('live', on);
+    d.textContent = on ? 'Live' : 'Offline';
+    wf.classList.toggle('muted', !on);
+  };
+
+  // ─── Load default grading prompt ────────────────────────────────────────
+  (async () => {
+    try {
+      const r = await fetch('/api/grading-prompt');
+      const j = await r.json();
+      $('grading-prompt').value = j.prompt || '';
+      $('grading-prompt').dataset.default = j.prompt || '';
+    } catch (e) { console.warn('default prompt fetch failed', e); }
+  })();
+  $('reset-prompt').onclick = () => {
+    $('grading-prompt').value = $('grading-prompt').dataset.default || '';
+  };
+
+  // ─── Generate flow ──────────────────────────────────────────────────────
+  $('generate-btn').onclick = async () => {
+    const question = $('question').value.trim();
+    if (!question) { alert('Enter a question first.'); return; }
+    const duration = parseInt($('duration').value || '6', 10);
+    const promptOverride = $('grading-prompt').value.trim();
+    const defaultPrompt = $('grading-prompt').dataset.default || '';
+    const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
+
+    $('generate-btn').disabled = true;
+    setStatus('Generating flow…');
+    setThinking(true);
+    $('flow-preview').innerHTML = '<div class="empty">Designing exam flow…</div>';
+
+    try {
+      const r = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom }),
+      });
+      if (!r.ok) {
+        const err = await r.json();
+        throw new Error(JSON.stringify(err.detail || err));
+      }
+      const data = await r.json();
+      sessionId = data.session_id;
+      renderFlow(data.flow);
+      setStatus(`Session ${sessionId.slice(-6)} ready`, 'live');
+      $('call-btn').disabled = false;
+      $('call-btn').classList.add('ready');
+      $('call-btn').title = 'Start the exam';
+      $('hint-text').textContent = '↓  Click START EXAM below to begin  ↓';
+    } catch (e) {
+      console.error(e);
+      setStatus('Flow generation failed', 'err');
+      $('flow-preview').innerHTML = `<div class="empty" style="color:var(--bad)">${e.message}</div>`;
+    } finally {
+      $('generate-btn').disabled = false;
+      setThinking(false);
+    }
+  };
+
+  function renderFlow(flow) {
+    const required = new Set(flow.required_probes || []);
+    let html = `
+      <div class="probe">
+        <div class="row">
+          <span class="type" style="color:var(--accent-2)">QUESTION</span>
+        </div>
+        <div class="prompt" style="color:var(--text); font-weight: 600;">${esc(flow.exam_question)}</div>
+      </div>
+      <h2 style="margin-top:16px">Probe pool · ${flow.probe_pool.length}</h2>
+    `;
+    for (const p of flow.probe_pool) {
+      const star = required.has(p.id) ? `<span class="star">★ REQUIRED</span>` : '';
+      html += `
+        <div class="probe">
+          <div class="row">
+            <span class="type">${esc(p.type)}</span>
+            <span class="id">${esc(p.id)}</span>
+            ${star}
+          </div>
+          <div class="prompt">${esc(p.prompt)}</div>
+          ${p.scaffold ? `<div class="scaffold"><b style="color:var(--muted-2)">scaffold:</b> ${esc(p.scaffold)}</div>` : ''}
+        </div>
+      `;
+    }
+    $('flow-preview').innerHTML = html;
+  }
+
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+
+  // ─── Call button — connect / disconnect toggle ──────────────────────────
+  $('call-btn').onclick = () => {
+    if (pc) disconnect(); else connect();
+  };
+
+  async function connect() {
+    if (!sessionId) { alert('Generate a flow first.'); return; }
+
+    // Secure-context check — getUserMedia is blocked on non-secure origins
+    // EXCEPT localhost / 127.0.0.1. So if we're on http://0.0.0.0 or a LAN IP, fail loud.
+    if (!window.isSecureContext) {
+      const host = window.location.hostname;
+      alert(
+        `This page is not a secure context (mic access is blocked).\n\n` +
+        `You are on http://${host}:${window.location.port}\n\n` +
+        `Fix: open http://localhost:${window.location.port} or ` +
+        `http://127.0.0.1:${window.location.port} instead.\n\n` +
+        `For remote access, run:\n  cloudflared tunnel --url http://localhost:${window.location.port}`
+      );
+      setStatus('Insecure context — use localhost', 'err');
+      $('call-btn').disabled = false;
+      return;
+    }
+
+    $('call-btn').disabled = true;
+    setStatus('Connecting…');
+    setOrbState('listening');
+    setThinking(true);
+    $('hint-text').textContent = 'Connecting…';
+    $('log').innerHTML = '<div class="empty">Establishing voice connection…</div>';
+
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+      // Data channel — pipecat's SmallWebRTCTransport uses it to ship RTVI
+      // control + transcript events. Must be created BEFORE createOffer so
+      // the SDP includes a data section. Without this the server queues
+      // messages until the queue fills up and they're discarded.
+      const dc = pc.createDataChannel('rtvi-ai');
+      dc.onopen = () => console.log('[dc] open');
+      dc.onclose = () => console.log('[dc] closed');
+      dc.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          console.log('[dc msg]', msg);
+        } catch {
+          console.log('[dc raw]', ev.data);
+        }
+      };
+
+      // Send mic
+      for (const t of micStream.getTracks()) pc.addTrack(t, micStream);
+
+      // Receive bot audio
+      pc.ontrack = (ev) => {
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.autoplay = true;
+          document.body.appendChild(audioEl);
+        }
+        audioEl.srcObject = ev.streams[0];
+        startWaveform(ev.streams[0]);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const s = pc.iceConnectionState;
+        if (s === 'connected' || s === 'completed') {
+          setStatus('Live', 'live');
+          setLive(true);
+          setOrbState('talking');
+          setThinking(false);
+          $('hint-text').textContent = 'Speak naturally';
+          $('call-btn').classList.remove('ready');
+          $('call-btn').classList.add('live');
+          $('call-btn-label').textContent = 'End Exam';
+          $('call-btn').disabled = false;
+          $('call-btn').title = 'End exam';
+          startLivePolling();
+        } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+          handleDisconnect();
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const resp = await fetch('/api/offer', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ sdp: offer.sdp, type: offer.type, request_data: { session_id: sessionId } }),
+      });
+      if (!resp.ok) throw new Error('offer failed: ' + resp.status);
+      const answer = await resp.json();
+      await pc.setRemoteDescription(answer);
+    } catch (e) {
+      console.error(e);
+      setStatus('Connection failed', 'err');
+      setOrbState('idle');
+      setThinking(false);
+      $('call-btn').disabled = false;
+    }
+  }
+
+  function disconnect() {
+    if (pc) { pc.close(); pc = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    handleDisconnect();
+  }
+
+  function handleDisconnect() {
+    setOrbState('idle');
+    setLive(false);
+    stopWaveform();
+    $('call-btn').classList.remove('live', 'ready');
+    $('call-btn').disabled = true;
+    $('call-btn-label').textContent = 'Grading…';
+    $('call-btn').title = 'Grading in progress';
+    $('hint-text').textContent = 'Grading audio…';
+    setStatus('Exam ended · grading…');
+    setThinking(true);
+  }
+
+  // ─── Waveform ───────────────────────────────────────────────────────────
+  function startWaveform(stream) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const draw = () => {
+        analyser.getByteFrequencyData(data);
+        for (let i = 0; i < NUM_BARS; i++) {
+          const v = data[i % data.length] / 255;
+          const h = Math.max(2, v * 70);
+          bars[i].style.height = h + 'px';
+        }
+        waveformRAF = requestAnimationFrame(draw);
+      };
+      draw();
+    } catch (e) { console.warn('waveform start failed', e); }
+  }
+  function stopWaveform() {
+    if (waveformRAF) cancelAnimationFrame(waveformRAF);
+    waveformRAF = null;
+    bars.forEach(b => b.style.height = '4px');
+  }
+
+  // ─── Live transcript + report polling ───────────────────────────────────
+  let transcriptPoller = null;
+  let lastTurnCount = 0;
+
+  function startLivePolling() {
+    setLogLive(true);
+    if (transcriptPoller) clearInterval(transcriptPoller);
+    // Poll transcript fast while live
+    transcriptPoller = setInterval(pollTranscript, 1500);
+    // Poll report less often
+    if (reportPoller) clearInterval(reportPoller);
+    reportPoller = setInterval(pollReport, 3000);
+    // Kick once immediately
+    pollTranscript();
+  }
+
+  async function pollTranscript() {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`/api/sessions/${sessionId}/transcript`);
+      if (!r.ok) return;
+      const j = await r.json();
+      const turns = j.turns || [];
+      renderTranscript(turns);
+      // If the report has landed and finalised the transcript, stop polling it
+      if (j.final && transcriptPoller) {
+        clearInterval(transcriptPoller);
+        transcriptPoller = null;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function pollReport() {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`/api/sessions/${sessionId}/report`);
+      if (r.ok) {
+        const report = await r.json();
+        clearInterval(reportPoller); reportPoller = null;
+        if (transcriptPoller) { clearInterval(transcriptPoller); transcriptPoller = null; }
+        renderReport(report);
+        renderTranscript(report.transcript || []);
+        setStatus('Report ready', 'live');
+        $('hint-text').textContent = 'Exam complete';
+        setThinking(false);
+        setLogLive(false);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function setLogLive(on) {
+    const t = $('log-live');
+    t.classList.toggle('live', on);
+    t.textContent = on ? 'live' : 'offline';
+  }
+
+  function renderTranscript(turns) {
+    if (!turns.length) return;
+    // Only re-render if the number of turns or last text has changed (cheap)
+    const sig = turns.length + ':' + (turns[turns.length - 1]?.text || '').slice(-40);
+    if (sig === renderTranscript._lastSig) return;
+    renderTranscript._lastSig = sig;
+    const html = turns.map(t => `
+      <div class="turn">
+        <div class="who ${t.speaker.toLowerCase()}">${esc(t.speaker)}</div>
+        <div class="what">${esc(t.text)}</div>
+      </div>
+    `).join('');
+    const log = $('log');
+    log.innerHTML = html;
+    // Auto-scroll to bottom if user was already near the bottom
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderReport(r) {
+    $('report-card').style.display = '';
+    // Grader failure path — surface it loudly instead of an empty card
+    if (r.error) {
+      $('report-area').innerHTML = `
+        <div class="overall" style="border-color: var(--bad);">
+          <div class="num" style="color: var(--bad);">!</div>
+          <div class="lab" style="color: var(--bad);">Grading failed</div>
+          <div class="summary">${esc(r.error)}</div>
+          ${r.raw ? `<details style="margin-top:10px; text-align:left;">
+            <summary style="font-size:10px;">show raw grader output</summary>
+            <pre style="font-size:10px; color:var(--muted-2); white-space:pre-wrap; word-break:break-word; margin-top:6px;">${esc(r.raw.slice(0, 4000))}</pre>
+          </details>` : ''}
+        </div>
+      `;
+      return;
+    }
+    const dims = r.dimensions || {};
+    const order = ['clarity','reasoning','examples','engagement','fluency','pronunciation','confidence'];
+    let html = `
+      <div class="overall">
+        <div class="num">${r.overall_score ?? '—'}<span class="num sub">/100</span></div>
+        <div class="lab">Overall Score</div>
+        ${r.headline ? `<div class="headline">${esc(r.headline)}</div>` : ''}
+        ${r.summary  ? `<div class="summary">${esc(r.summary)}</div>` : ''}
+      </div>
+    `;
+    if ((r.strengths || []).length) {
+      html += `<div class="section"><h3>Strengths</h3><ul>` +
+        r.strengths.map(s => `<li>${esc(s)}</li>`).join('') + `</ul></div>`;
+    }
+    if ((r.growth_areas || []).length) {
+      html += `<div class="section"><h3>Growth Areas</h3><ul>` +
+        r.growth_areas.map(s => `<li>${esc(s)}</li>`).join('') + `</ul></div>`;
+    }
+    for (const key of order) {
+      const d = dims[key]; if (!d) continue;
+      const pct = d.score_pct ?? (((d.score || 1) - 1) / 3 * 100);
+      html += `
+        <div class="dim">
+          <div class="head">
+            <span class="label">${esc(d.label || key)}</span>
+            <span class="score">${d.score ?? '—'}<span class="max">/4</span></span>
+          </div>
+          <div class="bar"><div style="width:${pct}%"></div></div>
+          <div class="analysis">${esc(d.analysis || '')}</div>
+          ${(d.evidence || []).length ? `<div class="evidence">"${esc(d.evidence.join('" · "'))}"</div>` : ''}
+        </div>
+      `;
+    }
+    $('report-area').innerHTML = html;
+  }
+
+  // ─── State pill click for demo / preview ────────────────────────────────
+  document.querySelectorAll('.pill').forEach(p => {
+    p.onclick = () => {
+      // visual preview only when not connected
+      if (!pc) setOrbState(p.dataset.state);
+    };
+  });
+  </script>
+</body>
+</html>

@@ -631,7 +631,7 @@ async def handle_advance_from_comparison(
 
 RECORDINGS_DIR = Path(__file__).parent / "recordings"
 REPORTS_DIR = Path(__file__).parent / "reports"
-GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3-pro-preview")
+GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3.1-pro-preview")
 
 DIMENSIONS = {
     "clarity":       {"weight": 0.10, "label": "Clarity of Position"},

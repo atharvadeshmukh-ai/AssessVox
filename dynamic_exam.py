@@ -22,7 +22,7 @@ Required env vars:
   GOOGLE_API_KEY             — used for planning, conversation, grading
   DEEPGRAM_API_KEY           — STT
   CARTESIA_API_KEY           — TTS
-  GEMINI_GRADER_MODEL        — optional, default 'gemini-3-pro-preview'
+  GEMINI_GRADER_MODEL        — optional, default 'gemini-3.1-pro-preview'
 
 Run with:
     uv run dynamic_exam.py
@@ -1051,7 +1051,7 @@ def build_probe_factories(flow_spec: FlowSpec) -> dict[str, Callable]:
 
 # ─── Grading (ported from teacher2.py) ────────────────────────────────────────
 
-GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3-pro-preview")
+GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3.1-pro-preview")
 
 DIMENSIONS = {
     "clarity":       {"weight": 0.10, "label": "Clarity of Position"},

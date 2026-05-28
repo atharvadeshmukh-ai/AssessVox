@@ -199,17 +199,25 @@ def get_current_transcript() -> list[dict]:
         return []
 
 
+# Optional teacher-provided student name. When set, run_bot skips the
+# STT-driven name-capture greeting entirely.
+_PROVIDED_STUDENT_NAME: str | None = None
+
+
 def set_active_flow(
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
+    student_name: str | None = None,
 ) -> None:
     """Configure module-level state for a session. Called by the server before
     spawning a bot, or by bot() in CLI mode after generating the flow."""
     global _FLOW_SPEC, _PROBE_FACTORIES, _REQUIRED_PROBES, _CUSTOM_GRADING_PROMPT
+    global _PROVIDED_STUDENT_NAME
     _FLOW_SPEC = flow_spec
     _PROBE_FACTORIES = build_probe_factories(flow_spec)
     _REQUIRED_PROBES = set(flow_spec.required_probes)
     _CUSTOM_GRADING_PROMPT = custom_grading_prompt
+    _PROVIDED_STUDENT_NAME = (student_name or "").strip() or None
 
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
@@ -441,6 +449,55 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
 
 
 # ─── Name confirmation + spell-out fallback ────────────────────────────────────
+
+def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
+    """Greeting used when the teacher provided the student's name via the UI.
+    Greets by name, introduces the examiner, then asks 'Are you ready to begin?'
+    and waits for the student's reply before transitioning to the first
+    question. Skips STT-based name capture entirely.
+    """
+    name = flow_manager.state.get("name", "student")
+    return NodeConfig(
+        name="greeting_known_name",
+        role_messages=ROLE_MESSAGES,
+        task_messages=[{
+            "role": "system",
+            "content": (
+                f"The student's name is {name}. Greet {name} warmly by name in "
+                "one or two short sentences, introduce yourself as their IB MYP "
+                "oral examiner, and reassure them there are no right or wrong "
+                "answers — you want to hear their thoughts. End your greeting "
+                "by asking clearly: 'Are you ready to begin?'\n\n"
+                "DO NOT ask the exam question yet. DO NOT call any function "
+                "until the student has spoken. Wait for the student's reply.\n\n"
+                "After the student replies, call begin_exam ONCE with:\n"
+                "  intent='ready'     — student said yes / ready / sure / okay / "
+                "any clear affirmative.\n"
+                "  intent='not_ready' — student said no / wait / give me a moment / "
+                "asked a question / expressed nervousness.\n\n"
+                "Do NOT ask for the student's name; you already have it."
+            ),
+        }],
+        functions=[
+            FlowsFunctionSchema(
+                name="begin_exam",
+                handler=handle_begin_exam,
+                description=(
+                    "Call once after the student replies to 'Are you ready to "
+                    "begin?'. Passes their readiness intent."
+                ),
+                properties={
+                    "intent": {
+                        "type": "string",
+                        "enum": ["ready", "not_ready"],
+                        "description": "Whether the student is ready to start the exam.",
+                    },
+                },
+                required=["intent"],
+            ),
+        ],
+    )
+
 
 def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
     """After the greeting captures a name, read it back and ask the student to
@@ -1087,6 +1144,36 @@ async def handle_name_confirmation(
     return ({"next_action": "spell_name"}, create_spell_name_node(flow_manager))
 
 
+async def handle_begin_exam(
+    args: FlowArgs, flow_manager: FlowManager
+) -> tuple[dict, NodeConfig]:
+    """Used by create_known_name_greeting_node. If the student is ready,
+    transitions to the opening exam question. If not, stays in the greeting
+    node so the bot can reassure them and re-ask."""
+    intent = args.get("intent", "ready")
+    if intent == "not_ready":
+        # Re-render the greeting so the LLM can offer reassurance and re-ask.
+        # The reply will route here again with a fresh intent.
+        flow_manager.state["not_ready_count"] = (
+            flow_manager.state.get("not_ready_count", 0) + 1
+        )
+        logger.info(
+            f"Student not yet ready (count={flow_manager.state['not_ready_count']}); "
+            "staying in greeting."
+        )
+        return (
+            {"next_action": "wait_for_student"},
+            create_known_name_greeting_node(flow_manager),
+        )
+
+    logger.info("Student is ready; advancing to opening question.")
+    flow_manager.state.update({
+        "off_topic_count": 0,
+        "current_probe": "opening",
+    })
+    return ({}, create_opening_node(flow_manager))
+
+
 async def handle_spelled_name(
     args: FlowArgs, flow_manager: FlowManager
 ) -> tuple[dict, NodeConfig]:
@@ -1524,21 +1611,23 @@ _STT_STOPWORDS = {
 # Common Indian/South-Asian first names — biases Deepgram toward proper-noun
 # recognition during the greeting node. Capitalisation is preserved by keyterm
 # prompting, so the bot gets the name back already title-cased.
-_NAME_KEYTERMS = [
-    "Aarav", "Aanya", "Aarush", "Aditi", "Aditya", "Advait", "Advika", "Akash",
-    "Aman", "Amrita", "Ananya", "Anika", "Anish", "Anjali", "Ansh", "Anushka",
-    "Arjun", "Arnav", "Aryan", "Atharva", "Avani", "Avinash", "Ayaan", "Ayush",
-    "Bhavya", "Chirag", "Daksh", "Darsh", "Devansh", "Dhruv", "Diya", "Esha",
-    "Gauri", "Harini", "Harsh", "Hiya", "Ishaan", "Ishita", "Ivaan", "Jay",
-    "Kabir", "Kairav", "Kavya", "Khushi", "Kiaan", "Krish", "Krisha", "Laksh",
-    "Lavanya", "Manav", "Mira", "Mithra", "Myra", "Naina", "Navya", "Neil",
-    "Nikhil", "Nisha", "Nitya", "Om", "Pari", "Parth", "Pranav", "Prisha",
-    "Priya", "Purva", "Raghav", "Rahul", "Reyansh", "Rhea", "Riya", "Rohan",
-    "Rudra", "Saanvi", "Sahana", "Sahil", "Samaira", "Samar", "Sanvi", "Sara",
-    "Shaurya", "Shivansh", "Shreya", "Siddharth", "Sneha", "Soham", "Tanvi",
-    "Tara", "Tejas", "Vaani", "Vansh", "Veer", "Vihaan", "Vivaan", "Yash",
-    "Zara",
-]
+# Disabled — keep the list around for future re-enable.
+# _NAME_KEYTERMS = [
+#     "Aarav", "Aanya", "Aarush", "Aditi", "Aditya", "Advait", "Advika", "Akash",
+#     "Aman", "Amrita", "Ananya", "Anika", "Anish", "Anjali", "Ansh", "Anushka",
+#     "Arjun", "Arnav", "Aryan", "Atharva", "Avani", "Avinash", "Ayaan", "Ayush",
+#     "Bhavya", "Chirag", "Daksh", "Darsh", "Devansh", "Dhruv", "Diya", "Esha",
+#     "Gauri", "Harini", "Harsh", "Hiya", "Ishaan", "Ishita", "Ivaan", "Jay",
+#     "Kabir", "Kairav", "Kavya", "Khushi", "Kiaan", "Krish", "Krisha", "Laksh",
+#     "Lavanya", "Manav", "Mira", "Mithra", "Myra", "Naina", "Navya", "Neil",
+#     "Nikhil", "Nisha", "Nitya", "Om", "Pari", "Parth", "Pranav", "Prisha",
+#     "Priya", "Purva", "Raghav", "Rahul", "Reyansh", "Rhea", "Riya", "Rohan",
+#     "Rudra", "Saanvi", "Sahana", "Sahil", "Samaira", "Samar", "Sanvi", "Sara",
+#     "Shaurya", "Shivansh", "Shreya", "Siddharth", "Sneha", "Soham", "Tanvi",
+#     "Tara", "Tejas", "Vaani", "Vansh", "Veer", "Vihaan", "Vivaan", "Yash",
+#     "Zara",
+# ]
+_NAME_KEYTERMS: list[str] = []
 
 
 def _extract_keyterms(flow_spec: FlowSpec, limit: int = 100) -> list[str]:
@@ -1577,10 +1666,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
         f"sample={keyterms[:10]}…"
     )
 
-    # "multi" → Nova-3 multilingual (March 2026) with multilingual keyterm
-    # prompting. Handles Indian-English phonotactics for student names far
-    # better than the US-leaning default. Override via STT_LANGUAGE=en-IN or =en
-    # if needed.
+    # Nova-3 multilingual. Better handling of South-Asian student names than the
+    # US-leaning `en` default, and keyterm prompting still works on `multi`
+    # (Mar 2026 update). Override with STT_LANGUAGE=en or =en-IN per deployment.
     stt_language = os.getenv("STT_LANGUAGE", "multi")
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
@@ -1742,7 +1830,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
             "started_at_iso": started_at["t"].isoformat(timespec="seconds"),
         })
         await audio_buffer.start_recording()
-        await flow_manager.initialize(create_greeting_node())
+        if _PROVIDED_STUDENT_NAME:
+            flow_manager.state.update({"name": _PROVIDED_STUDENT_NAME})
+            logger.info(
+                f"Using prefilled student name {_PROVIDED_STUDENT_NAME!r}; "
+                "skipping STT name capture."
+            )
+            await flow_manager.initialize(
+                create_known_name_greeting_node(flow_manager)
+            )
+        else:
+            await flow_manager.initialize(create_greeting_node())
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -1764,10 +1862,15 @@ async def run_session(
     session_id: str,
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
+    student_name: str | None = None,
 ) -> None:
     """Server-friendly entry: caller provides transport, session_id, and a
     pre-generated FlowSpec. CLI mode uses bot() instead."""
-    set_active_flow(flow_spec, custom_grading_prompt=custom_grading_prompt)
+    set_active_flow(
+        flow_spec,
+        custom_grading_prompt=custom_grading_prompt,
+        student_name=student_name,
+    )
     logger.info(
         f"Flow ready | session={session_id} | {len(flow_spec.probe_pool)} probes | "
         f"required={flow_spec.required_probes} | question={flow_spec.exam_question!r}"

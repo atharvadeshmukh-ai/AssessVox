@@ -90,6 +90,7 @@ class CreateSessionRequest(BaseModel):
     question: str
     duration_minutes: int = 6
     custom_grading_prompt: str | None = None
+    student_name: str | None = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -142,6 +143,7 @@ async def create_session(req: CreateSessionRequest):
         "topic": req.question,
         "duration_minutes": req.duration_minutes,
         "custom_grading_prompt": req.custom_grading_prompt,
+        "student_name": (req.student_name or "").strip() or None,
         "flow_spec": flow_spec,
         "status": "ready",
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -244,6 +246,7 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             session_id=session_id,
             flow_spec=s["flow_spec"],
             custom_grading_prompt=s.get("custom_grading_prompt"),
+            student_name=s.get("student_name"),
         )
     except Exception:
         logger.exception(f"bot run failed for session {session_id}")

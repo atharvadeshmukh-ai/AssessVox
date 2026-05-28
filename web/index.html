@@ -368,6 +368,9 @@
         <h2>Exam Setup</h2>
         <div class="sub">Define the question. LLM designs the probe graph.</div>
 
+        <label>Student First Name</label>
+        <input id="student-name" type="text" placeholder="e.g. Karan (optional — skips voice name capture)" autocomplete="off" />
+
         <label>Question / Topic <span class="req">*</span></label>
         <textarea id="question" placeholder="e.g. Should AI replace teachers in schools?"></textarea>
 
@@ -539,6 +542,7 @@
     const question = $('question').value.trim();
     if (!question) { alert('Enter a question first.'); return; }
     const duration = parseInt($('duration').value || '6', 10);
+    const studentName = ($('student-name')?.value || '').trim() || null;
     const promptOverride = $('grading-prompt').value.trim();
     const defaultPrompt = $('grading-prompt').dataset.default || '';
     const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
@@ -552,7 +556,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom }),
+        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName }),
       });
       if (!r.ok) {
         const err = await r.json();

@@ -440,6 +440,96 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
     )
 
 
+# ─── Name confirmation + spell-out fallback ────────────────────────────────────
+
+def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
+    """After the greeting captures a name, read it back and ask the student to
+    confirm. If they reject, fall through to a spell-out node so a garbled STT
+    pass doesn't lock in the wrong name for the whole session."""
+    candidate = flow_manager.state.get("name_candidate", "")
+    return NodeConfig(
+        name="confirm_name",
+        role_messages=ROLE_MESSAGES,
+        task_messages=[{
+            "role": "system",
+            "content": (
+                f"You just heard the student's name as '{candidate}'. Read it "
+                f"back warmly in one short sentence to confirm — e.g. "
+                f"\"Great — I'll call you {candidate}. Did I get that right?\" "
+                "Wait for the student's reply, then call assess_name_confirmation "
+                "ONCE with one of:\n"
+                "  intent='confirmed'    — student agreed (yes / correct / that's right / nods verbally)\n"
+                "  intent='corrected'    — student rejected it or gave a different name\n"
+                "If 'corrected' and the student clearly stated a new name in the "
+                "same reply, pass it as corrected_name. Otherwise leave "
+                "corrected_name empty and we'll ask them to spell it."
+            ),
+        }],
+        functions=[
+            FlowsFunctionSchema(
+                name="assess_name_confirmation",
+                handler=handle_name_confirmation,
+                description="Call once after the student replies to the confirmation prompt.",
+                properties={
+                    "intent": {
+                        "type": "string",
+                        "enum": ["confirmed", "corrected"],
+                        "description": "Whether the student confirmed the read-back name.",
+                    },
+                    "corrected_name": {
+                        "type": "string",
+                        "description": (
+                            "If the student stated a new/corrected name in the same "
+                            "reply, put it here. Otherwise empty string."
+                        ),
+                    },
+                },
+                required=["intent", "corrected_name"],
+            ),
+        ],
+    )
+
+
+def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
+    """Asks the student to spell their first name letter by letter. STT is far
+    more accurate on individual letters than on a single-word proper noun, so
+    this is the recovery branch from the confirmation node."""
+    return NodeConfig(
+        name="spell_name",
+        role_messages=ROLE_MESSAGES,
+        task_messages=[{
+            "role": "system",
+            "content": (
+                "Apologise briefly for the mishearing in one short sentence, "
+                "then ask the student to spell their first name out letter by "
+                "letter — e.g. \"Sorry about that — could you spell your first "
+                "name for me, letter by letter?\". Wait for the student's "
+                "spelling, then call record_spelled_name ONCE with the "
+                "assembled name in title case. If the student's reply does not "
+                "look like a spelling (e.g. they just say a name again), still "
+                "accept that name."
+            ),
+        }],
+        functions=[
+            FlowsFunctionSchema(
+                name="record_spelled_name",
+                handler=handle_spelled_name,
+                description="Call once after the student spells (or restates) their name.",
+                properties={
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "The student's first name, assembled from the "
+                            "letters they spelled, title-cased."
+                        ),
+                    },
+                },
+                required=["name"],
+            ),
+        ],
+    )
+
+
 # ─── Opening (uses generated exam_question) ────────────────────────────────────
 
 def create_opening_node(flow_manager: FlowManager) -> NodeConfig:
@@ -950,13 +1040,9 @@ async def handle_greeting_routing(
     name_given = args.get("name_if_given", "").strip()
 
     if intent == "gave_name" and name_given:
-        logger.info(f"Name recorded: {name_given!r}")
-        flow_manager.state.update({
-            "name": name_given,
-            "off_topic_count": 0,
-            "current_probe": "opening",
-        })
-        return ({}, create_opening_node(flow_manager))
+        logger.info(f"Name candidate captured: {name_given!r} → confirm")
+        flow_manager.state.update({"name_candidate": name_given})
+        return ({"next_action": "confirm_name"}, create_confirm_name_node(flow_manager))
 
     if intent == "needs_clarification":
         logger.info("Greeting: clarification needed, no strike")
@@ -968,6 +1054,54 @@ async def handle_greeting_routing(
     if count >= 3:
         return ({"status": "exam_cancelled"}, create_cancel_exam_node(flow_manager))
     return ({"next_action": "wait_for_student"}, create_greeting_node(flow_manager))
+
+
+async def handle_name_confirmation(
+    args: FlowArgs, flow_manager: FlowManager
+) -> tuple[dict, NodeConfig]:
+    intent = args["intent"]
+    corrected = args.get("corrected_name", "").strip()
+    candidate = flow_manager.state.get("name_candidate", "").strip()
+
+    if intent == "confirmed" and candidate:
+        logger.info(f"Name confirmed: {candidate!r}")
+        flow_manager.state.update({
+            "name": candidate,
+            "off_topic_count": 0,
+            "current_probe": "opening",
+        })
+        return ({}, create_opening_node(flow_manager))
+
+    # Student rejected the read-back. If they supplied a corrected name in the
+    # same turn, use it directly; otherwise fall through to spell-out.
+    if corrected:
+        logger.info(f"Name corrected inline: {corrected!r}")
+        flow_manager.state.update({
+            "name": corrected,
+            "off_topic_count": 0,
+            "current_probe": "opening",
+        })
+        return ({}, create_opening_node(flow_manager))
+
+    logger.info("Name rejected, asking student to spell it out")
+    return ({"next_action": "spell_name"}, create_spell_name_node(flow_manager))
+
+
+async def handle_spelled_name(
+    args: FlowArgs, flow_manager: FlowManager
+) -> tuple[dict, NodeConfig]:
+    name = args.get("name", "").strip().title()
+    if not name:
+        # Defensive: shouldn't happen given required=["name"], but if the LLM
+        # gives an empty string fall back to a generic address rather than loop.
+        name = "student"
+    logger.info(f"Name recorded via spelling: {name!r}")
+    flow_manager.state.update({
+        "name": name,
+        "off_topic_count": 0,
+        "current_probe": "opening",
+    })
+    return ({}, create_opening_node(flow_manager))
 
 
 # ─── Flow-spec generation with validation + retry + persistence ───────────────
@@ -1387,6 +1521,26 @@ _STT_STOPWORDS = {
 }
 
 
+# Common Indian/South-Asian first names — biases Deepgram toward proper-noun
+# recognition during the greeting node. Capitalisation is preserved by keyterm
+# prompting, so the bot gets the name back already title-cased.
+_NAME_KEYTERMS = [
+    "Aarav", "Aanya", "Aarush", "Aditi", "Aditya", "Advait", "Advika", "Akash",
+    "Aman", "Amrita", "Ananya", "Anika", "Anish", "Anjali", "Ansh", "Anushka",
+    "Arjun", "Arnav", "Aryan", "Atharva", "Avani", "Avinash", "Ayaan", "Ayush",
+    "Bhavya", "Chirag", "Daksh", "Darsh", "Devansh", "Dhruv", "Diya", "Esha",
+    "Gauri", "Harini", "Harsh", "Hiya", "Ishaan", "Ishita", "Ivaan", "Jay",
+    "Kabir", "Kairav", "Kavya", "Khushi", "Kiaan", "Krish", "Krisha", "Laksh",
+    "Lavanya", "Manav", "Mira", "Mithra", "Myra", "Naina", "Navya", "Neil",
+    "Nikhil", "Nisha", "Nitya", "Om", "Pari", "Parth", "Pranav", "Prisha",
+    "Priya", "Purva", "Raghav", "Rahul", "Reyansh", "Rhea", "Riya", "Rohan",
+    "Rudra", "Saanvi", "Sahana", "Sahil", "Samaira", "Samar", "Sanvi", "Sara",
+    "Shaurya", "Shivansh", "Shreya", "Siddharth", "Sneha", "Soham", "Tanvi",
+    "Tara", "Tejas", "Vaani", "Vansh", "Veer", "Vihaan", "Vivaan", "Yash",
+    "Zara",
+]
+
+
 def _extract_keyterms(flow_spec: FlowSpec, limit: int = 100) -> list[str]:
     """Pull domain-specific words from the FlowSpec to bias Deepgram STT
     toward terms likely to appear in this exam. Lower-cases, dedupes, drops
@@ -1411,11 +1565,23 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
     logger.info(f"Starting dynamic oral exam bot | session={session_id}")
 
     # Per-session keyterms biasing Deepgram toward this exam's vocabulary.
-    keyterms = _extract_keyterms(_FLOW_SPEC) if _FLOW_SPEC else []
-    if keyterms:
-        logger.info(f"STT keyterms ({len(keyterms)}): {keyterms[:15]}{'…' if len(keyterms) > 15 else ''}")
+    # Prepend common South-Asian first names so the greeting node lands the
+    # student's name correctly (Nova-3 keyterm prompting preserves casing and
+    # gives a documented uplift on proper-noun entity recognition).
+    domain_keyterms = _extract_keyterms(_FLOW_SPEC) if _FLOW_SPEC else []
+    # Deepgram caps keyterms at ~100; keep names first, top up with domain words.
+    keyterms = (_NAME_KEYTERMS + domain_keyterms)[:100]
+    logger.info(
+        f"STT keyterms ({len(keyterms)}): {len(_NAME_KEYTERMS)} name(s) + "
+        f"{len(keyterms) - len(_NAME_KEYTERMS)} domain term(s); "
+        f"sample={keyterms[:10]}…"
+    )
 
-    stt_language = os.getenv("STT_LANGUAGE", "en")  # was "en-IN"; "en" auto-picks
+    # "multi" → Nova-3 multilingual (March 2026) with multilingual keyterm
+    # prompting. Handles Indian-English phonotactics for student names far
+    # better than the US-leaning default. Override via STT_LANGUAGE=en-IN or =en
+    # if needed.
+    stt_language = os.getenv("STT_LANGUAGE", "multi")
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         live_options=LiveOptions(

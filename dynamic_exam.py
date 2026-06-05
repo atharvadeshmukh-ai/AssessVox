@@ -20,9 +20,9 @@ Required env vars:
   EXAM_TOPIC                 — the teacher's question (default: gene editing)
   EXAM_DURATION_MINUTES      — target duration (default: 6)
   GOOGLE_API_KEY             — used for planning, conversation, grading
-  DEEPGRAM_API_KEY           — STT
+  ELEVENLABS_API_KEY         — STT (ElevenLabs Scribe v2 realtime)
   CARTESIA_API_KEY           — TTS
-  GEMINI_GRADER_MODEL        — optional, default 'gemini-3.1-pro-preview'
+  GEMINI_GRADER_MODEL        — optional, default 'gemini-3.5-flash'
 
 Run with:
     uv run dynamic_exam.py
@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -56,13 +57,32 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 logger.info("Silero VAD loaded")
 
 logger.info("Loading pipeline components...")
-from pipecat.frames.frames import Frame, TranscriptionFrame, TTSTextFrame
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    Frame,
+    FunctionCallResultFrame,
+    InterruptionFrame,
+    LLMFullResponseStartFrame,
+    StartFrame,
+    EndFrame,
+    CancelFrame,
+    TextFrame,
+    TranscriptionFrame,
+    TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
@@ -71,10 +91,12 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService, LiveOptions
+from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.groq.llm import GroqLLMService
 
 from websockets.asyncio.client import connect as _websocket_connect
+
 
 
 class FallbackCartesiaTTSService(CartesiaTTSService):
@@ -90,15 +112,32 @@ class FallbackCartesiaTTSService(CartesiaTTSService):
     def __init__(self, *, api_keys: list[str], voice_id: str, **kwargs):
         if not api_keys:
             raise ValueError("FallbackCartesiaTTSService needs at least one api_key")
-        # Initialise parent with the first key; we'll rotate self._api_key
-        # ourselves in _connect_websocket.
-        super().__init__(api_key=api_keys[0], voice_id=voice_id, **kwargs)
+        super().__init__(
+            api_key=api_keys[0],
+            settings=CartesiaTTSService.Settings(voice=voice_id),
+            **kwargs,
+        )
         self._api_keys: list[str] = list(api_keys)
         self._key_index: int = 0
 
     @staticmethod
     def _is_rotatable_error(msg: str) -> bool:
-        return any(token in msg for token in ("HTTP 402", "HTTP 401", "HTTP 403"))
+        # Rotate on key-rejection (402/401/403) AND on any transient connection
+        # failure — timed-out handshakes, refused connections, DNS hiccups, etc.
+        # These often mean "this key/region is down right now," and the next key
+        # may go through a different gateway and succeed. Worst case we waste a
+        # second retry; best case we recover a session that would otherwise be
+        # silent.
+        msg_l = msg.lower()
+        if any(token in msg for token in ("HTTP 402", "HTTP 401", "HTTP 403")):
+            return True
+        return any(token in msg_l for token in (
+            "timed out", "timeout",
+            "handshake",
+            "connection refused", "connection reset", "connection closed",
+            "name or service not known", "temporary failure in name resolution",
+            "no route to host",
+        ))
 
     @staticmethod
     def _mask(key: str) -> str:
@@ -106,8 +145,10 @@ class FallbackCartesiaTTSService(CartesiaTTSService):
 
     async def _connect_websocket(self):
         last_err: Exception | None = None
+        attempts = 0
         while self._key_index < len(self._api_keys):
             self._api_key = self._api_keys[self._key_index]
+            attempts += 1
             try:
                 if self._websocket and self._websocket.state.name == "OPEN":
                     return
@@ -131,18 +172,20 @@ class FallbackCartesiaTTSService(CartesiaTTSService):
                 if self._is_rotatable_error(msg):
                     logger.warning(
                         f"Cartesia key #{self._key_index + 1} "
-                        f"({self._mask(self._api_key)}) rejected: {msg[:120]} — "
+                        f"({self._mask(self._api_key)}) failed ({msg[:120]}) — "
                         f"trying next key"
                     )
                     self._key_index += 1
                     self._websocket = None
                     continue
-                # Non-rotatable error — surface immediately
-                logger.error(f"Cartesia non-rotatable error: {msg[:200]}")
+                logger.error(
+                    f"Cartesia non-rotatable error on key #{self._key_index + 1}: {msg[:200]}"
+                )
+                # Still advance so the giving-up log shows the right count.
+                self._key_index += 1
                 break
-        # All keys exhausted or non-rotatable failure
         logger.error(
-            f"Cartesia TTS giving up after trying {self._key_index} key(s); "
+            f"Cartesia TTS giving up after trying {attempts} key(s); "
             f"last error: {last_err}"
         )
         await self.push_error(
@@ -161,6 +204,396 @@ def _load_cartesia_keys() -> list[str]:
     ]
     return [k for k in candidates if k and k.strip()]
 
+
+class SmartTurnElevenLabsSTT(ElevenLabsRealtimeSTTService):
+    """ElevenLabs Realtime STT with a session-started gate for MANUAL commits.
+
+    ElevenLabs' WebSocket is TCP-open ~0.7 s before it sends `session_started`.
+    If a VADUserStoppedSpeakingFrame arrives in that window (e.g. user speaks
+    immediately), the commit is sent before ElevenLabs is ready and gets dropped,
+    producing an empty transcript.
+
+    Fix: buffer the commit flag at startup. When `session_started` arrives, flush
+    any pending commit. After that the gate is open and commits flow normally.
+    """
+
+    # ElevenLabs rejects commits with < 0.3 s of uncommitted audio. Track when
+    # the bot started speaking so we can skip the echo flush if the bot's turn
+    # was too short to have accumulated enough audio to commit.
+    BOT_SPEECH_MIN_FOR_FLUSH_S = 0.35
+    # Minimum elapsed time since the previous commit before sending a new one.
+    # Same 300 ms ElevenLabs requirement + 50 ms safety margin.
+    COMMIT_COOLDOWN_S = 0.35
+    # How quickly to retry connect() after an unexpected mid-session disconnect.
+    RECONNECT_BACKOFF_S = 0.5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._session_ready: bool = False
+        self._pending_commit: bool = False
+        self._bot_was_speaking: bool = False
+        self._bot_started_at: float = 0.0
+        # Timestamp until which the next committed_transcript should be discarded
+        # (echo flush window). 0.0 means no discard pending.
+        self._discard_echo_until: float = 0.0
+        # Time of the last commit sent — used to gate watchdog commits so we
+        # don't trip ElevenLabs's "0.28s of uncommitted audio" rejection.
+        self._last_commit_at: float = 0.0
+        # Set to True between StartFrame and EndFrame/CancelFrame. When True
+        # and the websocket dies (server-initiated close), we proactively
+        # reconnect rather than wait for the next inbound audio frame to
+        # noticed it. Prevents the dead-air gap that ended last session.
+        self._exam_active: bool = False
+        self._reconnect_watcher_task: asyncio.Task | None = None
+
+    async def _send_flush_commit(self, reason: str):
+        """Send a zero-audio commit to flush ElevenLabs' buffer.
+
+        Marks a 2-second window during which the next committed_transcript is
+        silently dropped — it will contain bot audio (echo), not user speech.
+        Using a timed window rather than a boolean ensures the flag auto-expires
+        even if ElevenLabs never responds to an empty/silent flush.
+        """
+        if self._websocket:
+            try:
+                await self._websocket.send(json.dumps({
+                    "message_type": "input_audio_chunk",
+                    "audio_base_64": "",
+                    "commit": True,
+                    "sample_rate": self.sample_rate,
+                }))
+                self._discard_echo_until = time.monotonic() + 0.5
+                self._last_commit_at = time.monotonic()
+                logger.debug(f"SmartTurnElevenLabsSTT: echo-flush sent ({reason}), discard window open for 0.5s")
+            except Exception as e:
+                logger.warning(f"SmartTurnElevenLabsSTT: echo-flush failed: {e}")
+
+    async def _process_response(self, data: dict):
+        mtype = data.get("message_type", "")
+
+        if mtype == "session_started":
+            self._session_ready = True
+            logger.debug("SmartTurnElevenLabsSTT: session_started — commit gate open")
+            if self._pending_commit:
+                self._pending_commit = False
+                if self._websocket:
+                    try:
+                        await self._websocket.send(json.dumps({
+                            "message_type": "input_audio_chunk",
+                            "audio_base_64": "",
+                            "commit": True,
+                            "sample_rate": self.sample_rate,
+                        }))
+                        logger.debug("SmartTurnElevenLabsSTT: flushed deferred commit")
+                    except Exception as e:
+                        logger.warning(f"SmartTurnElevenLabsSTT: deferred commit failed: {e}")
+
+        elif mtype in ("committed_transcript", "committed_transcript_with_timestamps"):
+            if self._discard_echo_until and time.monotonic() < self._discard_echo_until:
+                self._discard_echo_until = 0.0  # consume the window
+                logger.debug("SmartTurnElevenLabsSTT: discarded bot-echo flush transcript (within window)")
+                return  # drop it — don't let parent emit a TranscriptionFrame
+
+        await super()._process_response(data)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_was_speaking = True
+            self._bot_started_at = time.monotonic()
+
+        elif isinstance(frame, BotStoppedSpeakingFrame) and self._bot_was_speaking:
+            # Bot just stopped (possibly interrupted by user barge-in).
+            # ElevenLabs still has bot audio in its buffer. Flush it now so the
+            # user's subsequent speech starts from a clean slate.
+            spoke_for = time.monotonic() - self._bot_started_at
+            self._bot_was_speaking = False
+            if self._session_ready and spoke_for >= self.BOT_SPEECH_MIN_FOR_FLUSH_S:
+                await self._send_flush_commit(f"bot stopped speaking ({spoke_for:.2f}s)")
+            elif self._session_ready:
+                logger.debug(
+                    f"SmartTurnElevenLabsSTT: skipping echo-flush — bot only "
+                    f"spoke {spoke_for:.2f}s (< {self.BOT_SPEECH_MIN_FOR_FLUSH_S}s, "
+                    "below ElevenLabs commit minimum)"
+                )
+
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            # Record turn start regardless of session readiness — used by latency tracker
+            _TURN_TIMING.clear()
+            _TURN_TIMING["vad_stop_at"] = time.perf_counter()
+            # The parent's process_frame will send a commit on this frame
+            # (MANUAL strategy). Record the time so the watchdog branch can
+            # gate itself against the cooldown.
+            if self._commit_strategy == CommitStrategy.MANUAL and self._session_ready:
+                self._last_commit_at = time.monotonic()
+
+        # Belt-and-braces commit: if the user turn closes WITHOUT a VAD stop
+        # (e.g. the pipecat watchdog firing `strategy: None` after 5s, or
+        # MinWords opening a turn from a single interim word that VAD never
+        # registered), ElevenLabs never gets `VADUserStoppedSpeakingFrame` and
+        # the audio in its buffer never commits → no final transcript → bot
+        # stuck. Send a manual commit on the generic UserStoppedSpeakingFrame
+        # too. Safe: if a VAD-driven commit already fired, this is a no-op on
+        # an empty buffer.
+        #
+        # Cooldown guard: ElevenLabs rejects commits when there's < 0.3s of new
+        # uncommitted audio since the last one. Skip if we just committed —
+        # this is what's been firing the "0.28s" ErrorFrames every session.
+        if (
+            isinstance(frame, UserStoppedSpeakingFrame)
+            and not isinstance(frame, VADUserStoppedSpeakingFrame)
+            and self._commit_strategy == CommitStrategy.MANUAL
+            and self._session_ready
+            and self._websocket
+        ):
+            since_last_commit = time.monotonic() - self._last_commit_at
+            if since_last_commit < self.COMMIT_COOLDOWN_S:
+                logger.debug(
+                    f"SmartTurnElevenLabsSTT: skipping watchdog commit — only "
+                    f"{since_last_commit:.2f}s since last commit "
+                    f"(< {self.COMMIT_COOLDOWN_S}s, would be rejected)"
+                )
+            else:
+                try:
+                    await self._websocket.send(json.dumps({
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": "",
+                        "commit": True,
+                        "sample_rate": self.sample_rate,
+                    }))
+                    self._last_commit_at = time.monotonic()
+                    logger.debug(
+                        "SmartTurnElevenLabsSTT: sent watchdog commit "
+                        "(UserStoppedSpeakingFrame without preceding VAD stop)"
+                    )
+                except Exception as e:
+                    logger.warning(f"SmartTurnElevenLabsSTT: watchdog commit failed: {e}")
+
+        if (
+            isinstance(frame, VADUserStoppedSpeakingFrame)
+            and self._commit_strategy == CommitStrategy.MANUAL
+            and not self._session_ready
+        ):
+            # Session not yet confirmed — defer the commit, still pass frame downstream.
+            # Temporarily mask commit_strategy so the parent skips its commit branch.
+            self._commit_strategy = CommitStrategy.VAD
+            try:
+                await super().process_frame(frame, direction)
+            finally:
+                self._commit_strategy = CommitStrategy.MANUAL
+            self._pending_commit = True
+            logger.debug("SmartTurnElevenLabsSTT: deferred commit (session_started not yet received)")
+        else:
+            await super().process_frame(frame, direction)
+
+    async def _connect(self):
+        self._session_ready = False
+        self._pending_commit = False
+        self._bot_was_speaking = False
+        self._bot_started_at = 0.0
+        self._discard_echo_until = 0.0
+        self._last_commit_at = 0.0
+        await super()._connect()
+
+    async def start(self, frame: StartFrame):
+        await super().start(frame)
+        self._exam_active = True
+        logger.info("SmartTurnElevenLabsSTT: exam active — reconnect-on-drop enabled")
+
+    async def stop(self, frame: EndFrame):
+        self._exam_active = False
+        await super().stop(frame)
+
+    async def cancel(self, frame: CancelFrame):
+        self._exam_active = False
+        await super().cancel(frame)
+
+    async def _disconnect_websocket(self):
+        """Override to detect unexpected mid-session disconnects.
+
+        ElevenLabs closes the websocket on its own after extended idle periods
+        or repeated bad commits. The base class accepts the close and does
+        nothing — leaving the pipeline in a dead-air state until the student
+        gives up and refreshes. We instead schedule a fresh `_connect()` so
+        the session keeps running.
+        """
+        # Capture state BEFORE the base class clears self._websocket.
+        was_active = self._exam_active and not self._reconnect_in_progress
+        await super()._disconnect_websocket()
+
+        if was_active:
+            logger.warning(
+                "SmartTurnElevenLabsSTT: ElevenLabs websocket dropped mid-exam — "
+                f"scheduling reconnect in {self.RECONNECT_BACKOFF_S}s"
+            )
+            self._reconnect_watcher_task = self.create_task(
+                self._auto_reconnect(), name="elevenlabs-auto-reconnect"
+            )
+
+    async def _auto_reconnect(self):
+        """Background task: sleep briefly then call _connect() to revive STT."""
+        try:
+            await asyncio.sleep(self.RECONNECT_BACKOFF_S)
+            if not self._exam_active:
+                logger.info("SmartTurnElevenLabsSTT: auto-reconnect skipped — exam ended")
+                return
+            try:
+                await self._connect()
+                logger.info("SmartTurnElevenLabsSTT: auto-reconnect succeeded")
+            except Exception as e:
+                logger.error(f"SmartTurnElevenLabsSTT: auto-reconnect failed: {e}")
+        finally:
+            self._reconnect_watcher_task = None
+
+
+# ─── Per-turn latency tracking ────────────────────────────────────────────────
+# Shared mutable dict; SmartTurnElevenLabsSTT and TurnLatencyTracker both write here.
+_TURN_TIMING: dict = {}
+_LAST_TURN_LATENCY: dict | None = None
+
+
+def get_last_turn_latency() -> dict | None:
+    return _LAST_TURN_LATENCY
+
+
+class TurnLatencyTracker(FrameProcessor):
+    """Tracks per-turn latency and logs a breakdown after each bot response starts.
+
+    Timing model:
+      vad_stop_at        — user stopped speaking (set by SmartTurnElevenLabsSTT)
+      transcript_at      — committed transcript received from STT
+      llm_start_at       — LLM started generating (LLMFullResponseStartFrame)
+      bot_started_at     — bot started speaking (BotStartedSpeakingFrame)
+
+    Total perceived latency = bot_started_at - vad_stop_at.
+    """
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        global _LAST_TURN_LATENCY
+
+        if isinstance(frame, TranscriptionFrame) and "vad_stop_at" in _TURN_TIMING:
+            _TURN_TIMING["transcript_at"] = time.perf_counter()
+
+        elif isinstance(frame, LLMFullResponseStartFrame) and "vad_stop_at" in _TURN_TIMING:
+            _TURN_TIMING["llm_start_at"] = time.perf_counter()
+
+        elif isinstance(frame, BotStartedSpeakingFrame) and "vad_stop_at" in _TURN_TIMING:
+            now = time.perf_counter()
+            _TURN_TIMING["bot_started_at"] = now
+
+            t0 = _TURN_TIMING["vad_stop_at"]
+            stt_ms   = round((_TURN_TIMING.get("transcript_at", now) - t0) * 1000)
+            llm_ms   = round((_TURN_TIMING.get("llm_start_at",  now) - _TURN_TIMING.get("transcript_at", t0)) * 1000)
+            tts_ms   = round((now - _TURN_TIMING.get("llm_start_at", _TURN_TIMING.get("transcript_at", t0))) * 1000)
+            total_ms = round((now - t0) * 1000)
+
+            _LAST_TURN_LATENCY = {
+                "total_ms": total_ms,
+                "stt_ms":   stt_ms,
+                "llm_ms":   llm_ms,
+                "tts_ms":   tts_ms,
+            }
+            logger.info(
+                f"[LATENCY] total={total_ms}ms  "
+                f"stt={stt_ms}ms  llm={llm_ms}ms  tts={tts_ms}ms"
+            )
+
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+
+
+class BargeinGuard(FrameProcessor):
+    """Suppress LLM re-runs from in-flight function calls when the user barges in.
+
+    Why: `FunctionCallResultFrame` is an `UninterruptibleFrame` — it survives
+    `InterruptionFrame`. If `advance_from_probe` (or any flow function) finishes
+    in the same few ms the user starts barging in, its result reaches the
+    assistant aggregator before `UserStartedSpeakingFrame` does, so the aggregator's
+    `not self._user_speaking` guard fails. The aggregator then pushes a fresh
+    context upstream and the bot starts speaking again right over the user.
+
+    Fix: place this processor immediately upstream of `context_aggregator.assistant()`.
+    On any sign of barge-in (`InterruptionFrame`, `VADUserStartedSpeakingFrame`,
+    or `UserStartedSpeakingFrame`) open a short window. While the window is open,
+    rewrite any passing `FunctionCallResultFrame` to `run_llm=False` so the
+    aggregator updates context silently without re-triggering the LLM.
+    The window closes when the user stops speaking.
+    """
+
+    BARGEIN_WINDOW_S = 3.0
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._suppress_until: float = 0.0
+
+    def _open_window(self, reason: str):
+        self._suppress_until = time.monotonic() + self.BARGEIN_WINDOW_S
+        logger.debug(f"BargeinGuard: window opened ({reason}) for {self.BARGEIN_WINDOW_S}s")
+
+    def _close_window(self, reason: str):
+        if self._suppress_until:
+            logger.debug(f"BargeinGuard: window closed ({reason})")
+        self._suppress_until = 0.0
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, (InterruptionFrame, VADUserStartedSpeakingFrame, UserStartedSpeakingFrame)):
+            self._open_window(type(frame).__name__)
+        elif isinstance(frame, (UserStoppedSpeakingFrame, VADUserStoppedSpeakingFrame)):
+            self._close_window(type(frame).__name__)
+        elif isinstance(frame, FunctionCallResultFrame):
+            if self._suppress_until and time.monotonic() < self._suppress_until:
+                if frame.run_llm is not False:
+                    logger.info(
+                        f"BargeinGuard: suppressing LLM re-run for "
+                        f"{frame.function_name}:{frame.tool_call_id} (barge-in active)"
+                    )
+                    frame.run_llm = False
+
+        await self.push_frame(frame, direction)
+
+
+class PlaceholderFilter(FrameProcessor):
+    """Drop bot text frames whose content is a known LLM placeholder string.
+
+    Why: Gemini occasionally interprets "wait silently after a function call"
+    instructions by emitting literal placeholder text like "Empty Message",
+    "(silent)", or "..." as the assistant turn. Without this filter, that
+    text flows through TTS — so the bot literally speaks "Empty Message" to
+    the student — and then lands in the transcript snapshot / grading
+    report.
+
+    Placement: sit BEFORE the TTS service in the pipeline, after the LLM.
+    Drops the offending TextFrame/TTSTextFrame outright so it never reaches
+    Cartesia or any downstream transcript collector.
+    """
+
+    _PLACEHOLDERS: set[str] = {
+        "empty message", "empty_message", "(empty)", "[empty]",
+        "no response", "no_response", "(no response)", "[no response]",
+        "(silent)", "[silent]", "silent", "silence",
+        "(wait)", "[wait]", "wait",
+        "...", "…", ".", "...",
+        "(pass)", "[pass]", "pass",
+        "(noop)", "[noop]", "noop", "no-op",
+        "null", "none",
+    }
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, (TextFrame, TTSTextFrame)):
+            text = (getattr(frame, "text", "") or "").strip().lower()
+            if text in self._PLACEHOLDERS:
+                logger.warning(
+                    f"PlaceholderFilter: dropped bot placeholder text "
+                    f"{getattr(frame, 'text', '')!r} (would have spoken/logged)"
+                )
+                return  # do not forward
+
+        await self.push_frame(frame, direction)
+
+
 from pipecat_flows import FlowManager, FlowsFunctionSchema, FlowArgs, NodeConfig
 
 from flow_planner import generate_flow
@@ -173,9 +606,11 @@ logger.info("All components loaded successfully!")
 load_dotenv(override=True)
 
 # ─── Paths ─────────────────────────────────────────────────────────────────────
-RECORDINGS_DIR = Path(__file__).parent / "recordings"
-REPORTS_DIR    = Path(__file__).parent / "reports"
-FLOWS_DIR      = Path(__file__).parent / "flows"
+RECORDINGS_DIR  = Path(__file__).parent / "recordings"
+REPORTS_DIR     = Path(__file__).parent / "reports"
+FLOWS_DIR       = Path(__file__).parent / "flows"
+LOGS_DIR        = Path(__file__).parent / "logs"
+TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 
 # ─── Module-level flow state (populated at startup) ────────────────────────────
 _FLOW_SPEC: FlowSpec | None = None
@@ -242,7 +677,10 @@ SYSTEM_PROMPT = (
     "   Treat confusion generously — help, do not strike. "
     "7. FUNCTION RESULT RULE: after any function call, read the NEW task instructions "
     "   and speak ONLY natural conversational sentences. "
-    "   If result has next_action='wait_for_student', stop and wait silently. "
+    "   If result has next_action='wait_for_student', return ZERO output — no text, "
+    "   no acknowledgement, no placeholder. Do NOT write 'Empty Message', '...', "
+    "   '(silent)', '[wait]', 'No response', or any other stand-in. The correct "
+    "   response is literally nothing — your assistant turn must be empty. "
     "8. NEVER output raw JSON, status codes, function names, curly braces, or technical content. "
     "9. Call any strike/transition function at most ONCE per student message. "
     "10. Voice conversation only — no markdown, no bullet points, no emojis. "
@@ -353,7 +791,7 @@ def _off_topic_instruction(count: int, name: str) -> str:
 
 async def handle_global_off_topic(
     args: FlowArgs, flow_manager: FlowManager
-) -> tuple[dict, NodeConfig]:
+) -> tuple[dict, NodeConfig | None]:
     count = flow_manager.state.get("off_topic_count", 0) + 1
     flow_manager.state.update({"off_topic_count": count})
     logger.info(f"Off-topic strike #{count}")
@@ -364,9 +802,28 @@ async def handle_global_off_topic(
     current = flow_manager.state.get("current_probe", "opening")
     if current == "opening":
         return ({"next_action": "wait_for_student"}, create_opening_node(flow_manager))
+    if current == "followup_probe":
+        # Dynamic node — rebuild it from the saved gold moment so a single
+        # off-topic strike doesn't end the exam.
+        gold = flow_manager.state.get("current_gold_moment", "")
+        if gold:
+            return (
+                {"next_action": "wait_for_student"},
+                create_followup_probe_node(flow_manager, gold),
+            )
+        # No gold cached — stay on the current node (no transition).
+        logger.warning(
+            "Off-topic during followup_probe with no cached gold — staying on node"
+        )
+        return ({"next_action": "wait_for_student"}, None)
     if current in _PROBE_FACTORIES:
         return ({"next_action": "wait_for_student"}, _PROBE_FACTORIES[current](flow_manager))
-    return ({}, create_closing_node(flow_manager))
+    # Unknown current_probe — DO NOT close the exam on a single strike. Stay
+    # on the current node and let the LLM redirect the student back on topic.
+    logger.warning(
+        f"Off-topic on unknown probe {current!r} — staying on node (was closing exam)"
+    )
+    return ({"next_action": "wait_for_student"}, None)
 
 
 # ─── Cancel node ───────────────────────────────────────────────────────────────
@@ -412,18 +869,28 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
         task_messages=[{
             "role": "system",
             "content": (
-                "Greet the student warmly. Introduce yourself as their IB MYP oral examiner. "
-                "Explain you will have a short discussion and that there are no right or "
-                "wrong answers — you want to hear their thoughts. Ask for their name.\n\n"
-                f"GREETING STRIKES SO FAR: {count}.\n\n"
-                "After EVERY student message, call assess_name_response ONCE with:\n"
+                "STEP 1 — INITIAL GREETING (no function call yet).\n"
+                "If there is NO user message in the conversation history (i.e. the "
+                "student has not spoken yet), simply greet the student warmly. "
+                "Introduce yourself as their IB MYP oral examiner. Explain you will "
+                "have a short discussion and that there are no right or wrong "
+                "answers — you want to hear their thoughts. Ask for their name. "
+                "Then STOP and WAIT silently. Do NOT call assess_name_response. "
+                "Do NOT call any function. Do NOT say anything else. WAIT.\n\n"
+                "STEP 2 — AFTER STUDENT SPEAKS.\n"
+                "Only AFTER the student has actually sent a message in response, "
+                "call assess_name_response ONCE with:\n"
                 "  intent='gave_name'           — student gave a real first name\n"
                 "  intent='needs_clarification' — confused or asking about the question\n"
                 "  intent='evasion'             — unrelated tangent or deliberate dodge\n\n"
                 f"For 'evasion': {evasion_tone} Then call assess_name_response.\n"
                 "For 'needs_clarification': respond helpfully, then call assess_name_response.\n\n"
-                "CRITICAL: call assess_name_response at most ONCE per student message. "
-                "Do NOT accept single words like 'Hi' or 'okay' as a name."
+                f"GREETING STRIKES SO FAR: {count}.\n\n"
+                "CRITICAL RULES:\n"
+                "• NEVER call assess_name_response on your own assistant message. "
+                "Only call it in response to a real student utterance.\n"
+                "• Call assess_name_response at most ONCE per student message.\n"
+                "• Do NOT accept single words like 'Hi' or 'okay' as a name."
             ),
         }],
         functions=[
@@ -1030,6 +1497,9 @@ async def handle_transition(
         flow_manager.state.update({
             "gold_followed": gold_followed + 1,
             "current_probe": "followup_probe",
+            # Persist gold so off-topic / re-entry can rebuild the same node
+            # without losing the moment we were following.
+            "current_gold_moment": gold,
         })
         logger.info(f"Following gold moment: {gold!r}")
         return ({}, create_followup_probe_node(flow_manager, gold))
@@ -1092,9 +1562,22 @@ async def handle_transition(
 
 async def handle_greeting_routing(
     args: FlowArgs, flow_manager: FlowManager
-) -> tuple[dict, NodeConfig]:
+) -> tuple[dict, NodeConfig | None]:
     intent = args["intent"]
     name_given = args.get("name_if_given", "").strip()
+
+    # Phantom-call guard: the LLM sometimes calls this function on its own
+    # initial greeting before the student has uttered anything. Detect that and
+    # silently drop the call (return next_node=None → no transition, no new LLM
+    # generation). Without this guard the bot ends up apologising to itself in
+    # turn 2 and the greeting loops.
+    student_utterances = flow_manager.state.get("student_utterance_count", 0)
+    if student_utterances == 0 and not (intent == "gave_name" and name_given):
+        logger.warning(
+            f"Greeting: ignoring phantom assess_name_response (intent={intent!r}, "
+            f"no student message in context yet)"
+        )
+        return ({"next_action": "wait_for_student", "ignored": True}, None)
 
     if intent == "gave_name" and name_given:
         logger.info(f"Name candidate captured: {name_given!r} → confirm")
@@ -1272,7 +1755,7 @@ def build_probe_factories(flow_spec: FlowSpec) -> dict[str, Callable]:
 
 # ─── Grading (ported from teacher2.py) ────────────────────────────────────────
 
-GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3.1-pro-preview")
+GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3.5-flash")
 
 DIMENSIONS = {
     "clarity":       {"weight": 0.10, "label": "Clarity of Position"},
@@ -1585,6 +2068,12 @@ class ProbeAttemptCounter(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, TranscriptionFrame) and self._flow_manager is not None:
             state = self._flow_manager.state
+            # Global counter — incremented for every final student transcription,
+            # used by handle_greeting_routing to detect phantom function calls
+            # the LLM makes on its own greeting before the student has spoken.
+            state.update({
+                "student_utterance_count": state.get("student_utterance_count", 0) + 1
+            })
             current = state.get("current_probe")
             if current:
                 attempts: dict[str, int] = dict(state.get("probe_attempts", {}))
@@ -1596,90 +2085,52 @@ class ProbeAttemptCounter(FrameProcessor):
 
 # ─── Pipecat bot setup ─────────────────────────────────────────────────────────
 
-_STT_STOPWORDS = {
-    "what", "when", "where", "which", "while", "would", "could", "should",
-    "their", "there", "these", "those", "this", "that", "with", "from",
-    "into", "your", "yours", "about", "ask", "asking", "tell", "telling",
-    "student", "students", "answer", "answers", "examiner", "exam", "topic",
-    "probe", "prompt", "scaffold", "respond", "response", "based", "they",
-    "them", "then", "than", "have", "has", "had", "been", "being", "will",
-    "you", "yes", "the", "and", "for", "are", "but", "not", "one", "all",
-    "any", "out", "off", "use", "way", "may", "say", "see", "ask",
-}
 
 
-# Common Indian/South-Asian first names — biases Deepgram toward proper-noun
-# recognition during the greeting node. Capitalisation is preserved by keyterm
-# prompting, so the bot gets the name back already title-cased.
-# Disabled — keep the list around for future re-enable.
-# _NAME_KEYTERMS = [
-#     "Aarav", "Aanya", "Aarush", "Aditi", "Aditya", "Advait", "Advika", "Akash",
-#     "Aman", "Amrita", "Ananya", "Anika", "Anish", "Anjali", "Ansh", "Anushka",
-#     "Arjun", "Arnav", "Aryan", "Atharva", "Avani", "Avinash", "Ayaan", "Ayush",
-#     "Bhavya", "Chirag", "Daksh", "Darsh", "Devansh", "Dhruv", "Diya", "Esha",
-#     "Gauri", "Harini", "Harsh", "Hiya", "Ishaan", "Ishita", "Ivaan", "Jay",
-#     "Kabir", "Kairav", "Kavya", "Khushi", "Kiaan", "Krish", "Krisha", "Laksh",
-#     "Lavanya", "Manav", "Mira", "Mithra", "Myra", "Naina", "Navya", "Neil",
-#     "Nikhil", "Nisha", "Nitya", "Om", "Pari", "Parth", "Pranav", "Prisha",
-#     "Priya", "Purva", "Raghav", "Rahul", "Reyansh", "Rhea", "Riya", "Rohan",
-#     "Rudra", "Saanvi", "Sahana", "Sahil", "Samaira", "Samar", "Sanvi", "Sara",
-#     "Shaurya", "Shivansh", "Shreya", "Siddharth", "Sneha", "Soham", "Tanvi",
-#     "Tara", "Tejas", "Vaani", "Vansh", "Veer", "Vihaan", "Vivaan", "Yash",
-#     "Zara",
-# ]
-_NAME_KEYTERMS: list[str] = []
-
-
-def _extract_keyterms(flow_spec: FlowSpec, limit: int = 100) -> list[str]:
-    """Pull domain-specific words from the FlowSpec to bias Deepgram STT
-    toward terms likely to appear in this exam. Lower-cases, dedupes, drops
-    common English stopwords + short words."""
-    pool: set[str] = set()
-    sources = [flow_spec.topic, flow_spec.exam_question]
-    for p in flow_spec.probe_pool:
-        sources.append(p.prompt)
-        if p.scaffold:
-            sources.append(p.scaffold)
-
-    for text in sources:
-        for w in re.findall(r"[A-Za-z][A-Za-z\-']{3,}", text):
-            lw = w.lower()
-            if lw in _STT_STOPWORDS or len(lw) > 30:
-                continue
-            pool.add(lw)
-    return sorted(pool)[:limit]
-
-
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, session_id: str):
-    logger.info(f"Starting dynamic oral exam bot | session={session_id}")
-
-    # Per-session keyterms biasing Deepgram toward this exam's vocabulary.
-    # Prepend common South-Asian first names so the greeting node lands the
-    # student's name correctly (Nova-3 keyterm prompting preserves casing and
-    # gives a documented uplift on proper-noun entity recognition).
-    domain_keyterms = _extract_keyterms(_FLOW_SPEC) if _FLOW_SPEC else []
-    # Deepgram caps keyterms at ~100; keep names first, top up with domain words.
-    keyterms = (_NAME_KEYTERMS + domain_keyterms)[:100]
-    logger.info(
-        f"STT keyterms ({len(keyterms)}): {len(_NAME_KEYTERMS)} name(s) + "
-        f"{len(keyterms) - len(_NAME_KEYTERMS)} domain term(s); "
-        f"sample={keyterms[:10]}…"
+async def run_bot(
+    transport: BaseTransport,
+    runner_args: RunnerArguments,
+    session_id: str,
+    llm_provider: str = "google",
+    llm_model: str = "gemini-3.5-flash",
+    stt_language: str | None = "en",
+):
+    # Per-session log file — captures every loguru log line emitted during this
+    # session so we can post-mortem any one run without scrolling stdout.
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    session_log_path = LOGS_DIR / f"session_{session_id}.log"
+    _session_log_sink_id = logger.add(
+        str(session_log_path),
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        enqueue=True,
     )
 
-    # Nova-3 multilingual. Better handling of South-Asian student names than the
-    # US-leaning `en` default, and keyterm prompting still works on `multi`
-    # (Mar 2026 update). Override with STT_LANGUAGE=en or =en-IN per deployment.
-    stt_language = os.getenv("STT_LANGUAGE", "multi")
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        live_options=LiveOptions(
-            model="nova-3",
-            language=stt_language,
-            keyterm=keyterms or None,
-            smart_format=True,
-            punctuate=True,
+    logger.info(
+        f"Starting dynamic oral exam bot | session={session_id} | "
+        f"llm={llm_provider}:{llm_model}"
+    )
+
+    # Lock STT to a single language by default. ElevenLabs scribe_v2_realtime
+    # auto-detects when language_code is None, which means a momentary
+    # disfluency or accent can flip the transcript into Russian/Hindi/etc.
+    # Pass stt_language=None (or empty) explicitly to re-enable auto-detect.
+    stt_lang_code = (stt_language or "").strip() or None
+    if stt_lang_code:
+        logger.info(f"STT locked to language: {stt_lang_code!r}")
+    else:
+        logger.info("STT language: auto-detect (no lock)")
+    stt = SmartTurnElevenLabsSTT(
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        commit_strategy=CommitStrategy.MANUAL,  # SmartTurn v3 controls commit timing
+        params=ElevenLabsRealtimeSTTService.InputParams(
+            language_code=stt_lang_code,
+        ),
+        settings=ElevenLabsRealtimeSTTService.Settings(
+            model="scribe_v2_realtime",
         ),
     )
+
     cartesia_keys = _load_cartesia_keys()
     if not cartesia_keys:
         raise RuntimeError(
@@ -1694,13 +2145,47 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
         api_keys=cartesia_keys,
         voice_id="e07c00bc-4134-4eae-9ea4-1a55fb45746b",
     )
-    llm = GoogleLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        model="gemini-3.5-flash",
-    )
+
+    if llm_provider == "groq":
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            raise RuntimeError("GROQ_API_KEY not set in .env")
+        llm = GroqLLMService(
+            api_key=groq_key,
+            settings=GroqLLMService.Settings(model=llm_model),
+        )
+    else:
+        llm = GoogleLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            settings=GoogleLLMService.Settings(model=llm_model),
+        )
 
     context = LLMContext()
-    context_aggregator = LLMContextAggregatorPair(context)
+    # Per Pipecat docs (smart-turn-overview + speech-input):
+    #   • Keep VADParams(stop_secs=0.2) — SmartTurn v3 was trained on this; raising
+    #     it produces unpredictable COMPLETE/INCOMPLETE decisions.
+    #   • start_secs=0.3 (up from 0.2 default) so brief breaths / clicks don't
+    #     register as speech onset.
+    #   • MinWordsUserTurnStartStrategy(min_words=2) — while the bot is speaking,
+    #     ignore barge-ins under 2 words. Filters phantom "Hello?" / "Yeah." /
+    #     "Okay." that ElevenLabs scribe_v2 hallucinates from background noise.
+    #     When the bot is idle, 1 word still starts a turn (so normal turn-taking
+    #     stays responsive).
+    #   • stop strategy left unset → SmartTurn v3 is the default (since v0.0.102).
+    context_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(
+                stop_secs=0.2,
+                start_secs=0.3,
+                confidence=0.7,
+                min_volume=0.6,
+            )),
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+            ),
+        ),
+    )
 
     # Publish for /api/sessions/{id}/transcript polling
     global _CURRENT_CONTEXT, _CURRENT_SESSION_ID, _CURRENT_TRANSCRIPT
@@ -1716,20 +2201,28 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
     rtvi = RTVIProcessor()
     audio_buffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
     attempt_counter = ProbeAttemptCounter()
+    latency_tracker = TurnLatencyTracker()
+    bargein_guard = BargeinGuard()
+    placeholder_filter = PlaceholderFilter()
 
     pipeline = Pipeline([
         transport.input(),
         rtvi,
         stt,
+        latency_tracker,
         attempt_counter,
         user_transcript_collector,     # captures TranscriptionFrame BEFORE the user
                                         # aggregator consumes it
         context_aggregator.user(),
         llm,
+        placeholder_filter,            # drops "Empty Message" / "(silent)" / etc.
+                                        # before TTS speaks them
         tts,
         bot_transcript_collector,      # captures TTSTextFrame after TTS
         transport.output(),
         audio_buffer,
+        bargein_guard,                 # neutralises FunctionCallResultFrame.run_llm
+                                        # when barge-in is in flight
         context_aggregator.assistant(),
     ])
 
@@ -1851,9 +2344,36 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, sessio
     try:
         await runner.run(task)
     finally:
-        # Keep context readable briefly after disconnect so the UI can render
-        # the final transcript before grading completes, then clear.
-        pass  # _CURRENT_CONTEXT is cleared when the next run_bot starts
+        # Always dump a transcript snapshot — even if the session was cancelled
+        # before grading ran. This gives a paste-free way to inspect any session
+        # (failed, cancelled, or graded) by reading transcripts/transcript_<id>.json.
+        try:
+            TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+            snapshot_path = TRANSCRIPTS_DIR / f"transcript_{session_id}.json"
+            snapshot = {
+                "session_id":      session_id,
+                "ended_at":        datetime.now().isoformat(timespec="seconds"),
+                "student_name":    flow_manager.state.get("name"),
+                "current_probe":   flow_manager.state.get("current_probe"),
+                "node_trace":      flow_manager.state.get("node_trace", []),
+                "covered_probes":  flow_manager.state.get("covered_probes", []),
+                "off_topic_count": flow_manager.state.get("off_topic_count", 0),
+                "greeting_strikes": flow_manager.state.get("greeting_strikes", 0),
+                "turns":           _extract_transcript(context),
+                "log_file":        str(session_log_path),
+                "recording_file":  str(wav_path),
+                "report_file":     str(report_path) if report_path.exists() else None,
+                "flow_spec_file":  str(FLOWS_DIR / f"flow_{session_id}.json"),
+            }
+            snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
+            logger.info(f"Transcript snapshot saved → {snapshot_path}")
+        except Exception:
+            logger.exception("Failed to write transcript snapshot")
+        # Detach the per-session log sink so the next session opens a fresh file.
+        try:
+            logger.remove(_session_log_sink_id)
+        except Exception:
+            pass
 
 
 async def run_session(
@@ -1863,6 +2383,9 @@ async def run_session(
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
+    llm_provider: str = "google",
+    llm_model: str = "gemini-3.5-flash",
+    stt_language: str | None = "en",
 ) -> None:
     """Server-friendly entry: caller provides transport, session_id, and a
     pre-generated FlowSpec. CLI mode uses bot() instead."""
@@ -1875,7 +2398,11 @@ async def run_session(
         f"Flow ready | session={session_id} | {len(flow_spec.probe_pool)} probes | "
         f"required={flow_spec.required_probes} | question={flow_spec.exam_question!r}"
     )
-    await run_bot(transport, runner_args, session_id)
+    await run_bot(
+        transport, runner_args, session_id,
+        llm_provider=llm_provider, llm_model=llm_model,
+        stt_language=stt_language,
+    )
 
 
 async def bot(runner_args: RunnerArguments):
@@ -1901,8 +2428,6 @@ async def bot(runner_args: RunnerArguments):
             video_out_width=1280,
             video_out_height=720,
             video_out_bitrate=2_000_000,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            turn_analyzer=LocalSmartTurnAnalyzerV3(),
         ),
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
@@ -1911,8 +2436,6 @@ async def bot(runner_args: RunnerArguments):
             video_out_is_live=True,
             video_out_width=1280,
             video_out_height=720,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            turn_analyzer=LocalSmartTurnAnalyzerV3(),
         ),
     }
 

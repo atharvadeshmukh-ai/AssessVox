@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "google-genai>=1.73.1",
     "pipecat-ai-flows>=0.0.21",
-    "pipecat-ai[cartesia,daily,deepgram,google,local-smart-turn-v3,runner,silero,webrtc]>=0.0.86",
+    "pipecat-ai[cartesia,daily,elevenlabs,google,groq,local-smart-turn-v3,rnnoise,runner,silero,webrtc]>=0.0.86",
     "pipecatcloud>=0.2.4",
 ]
 

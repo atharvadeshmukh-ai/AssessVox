@@ -378,8 +378,31 @@
         <input id="duration" type="number" min="2" max="20" value="6" />
 
         <details id="adv-toggle">
-          <summary>Advanced — Grading Prompt</summary>
-          <label>Custom Grading Prompt</label>
+          <summary>Advanced Settings</summary>
+
+          <label>LLM Model</label>
+          <select id="llm-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="google|gemini-3.5-flash" selected>Gemini 3.5 Flash — best instruction-following (recommended)</option>
+            <option value="google|gemini-3.1-flash-lite">Gemini 3.1 Flash Lite — fastest · cheapest</option>
+            <option value="google|gemini-2.5-flash">Gemini 2.5 Flash — older</option>
+            <option value="groq|llama-3.3-70b-versatile">Groq · Llama 3.3 70B — ultra-low latency (&lt;100ms TTFT)</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Groq requires GROQ_API_KEY in .env</div>
+
+          <label style="margin-top:14px">STT Language</label>
+          <select id="stt-language-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="en" selected>English — locked (recommended)</option>
+            <option value="hi">Hindi</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="zh">Chinese (Mandarin)</option>
+            <option value="ar">Arabic</option>
+            <option value="">Auto-detect (may mis-detect on disfluencies)</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Locks ElevenLabs STT to a single language; prevents transcripts flipping to Russian/Hindi/etc.</div>
+
+          <label style="margin-top:14px">Custom Grading Prompt</label>
           <textarea id="grading-prompt" class="adv" placeholder="loading default..."></textarea>
           <div class="btn-row">
             <button id="reset-prompt">Reset Default</button>
@@ -429,6 +452,7 @@
       <div class="card log-card col-grow">
         <div class="log-head">
           <h2>Conversation</h2>
+          <span id="latency-badge" style="display:none;font-size:10px;color:var(--muted-2);letter-spacing:0.5px;background:var(--panel-2);border:1px solid var(--border);padding:2px 8px;margin-left:auto;margin-right:6px;"></span>
           <span class="live-tag" id="log-live">offline</span>
         </div>
         <div class="log" id="log">
@@ -546,6 +570,8 @@
     const promptOverride = $('grading-prompt').value.trim();
     const defaultPrompt = $('grading-prompt').dataset.default || '';
     const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
+    const [llm_provider, llm_model] = ($('llm-select').value || 'google|gemini-3.5-flash').split('|');
+    const stt_language = ($('stt-language-select')?.value ?? 'en');
 
     $('generate-btn').disabled = true;
     setStatus('Generating flow…');
@@ -556,7 +582,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName }),
+        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_language }),
       });
       if (!r.ok) {
         const err = await r.json();
@@ -642,7 +668,13 @@
     $('log').innerHTML = '<div class="empty">Establishing voice connection…</div>';
 
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
       pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
       // Data channel — pipecat's SmallWebRTCTransport uses it to ship RTVI
@@ -782,6 +814,14 @@
       const j = await r.json();
       const turns = j.turns || [];
       renderTranscript(turns);
+      // Update latency badge
+      const lat = j.last_turn_latency;
+      const badge = $('latency-badge');
+      if (lat && lat.total_ms) {
+        badge.style.display = '';
+        badge.textContent = `last turn ${lat.total_ms}ms  ·  stt ${lat.stt_ms}ms  llm ${lat.llm_ms}ms  tts ${lat.tts_ms}ms`;
+        badge.title = `STT: ${lat.stt_ms}ms · LLM: ${lat.llm_ms}ms · TTS: ${lat.tts_ms}ms · Total: ${lat.total_ms}ms`;
+      }
       // If the report has landed and finalised the transcript, stop polling it
       if (j.final && transcriptPoller) {
         clearInterval(transcriptPoller);

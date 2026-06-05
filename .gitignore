@@ -207,6 +207,11 @@ __marimo__/
 recordings/
 reports/
 flows/
+logs/
+transcripts/
+
+# macOS clutter
+.DS_Store
 
 # Local AI tool state
 .claude/

@@ -31,9 +31,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 # Pipecat WebRTC handler (mirrors pipecat/runner/run.py:_setup_webrtc_routes)
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
 from pipecat.runner.types import SmallWebRTCRunnerArguments
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
@@ -91,6 +89,11 @@ class CreateSessionRequest(BaseModel):
     duration_minutes: int = 6
     custom_grading_prompt: str | None = None
     student_name: str | None = None
+    llm_provider: str = "google"
+    llm_model: str = "gemini-3.5-flash"
+    # ISO-639-1 STT language. "en" locks transcripts to English (the default).
+    # Empty string / None re-enables ElevenLabs auto-detect.
+    stt_language: str | None = "en"
 
 
 class CreateSessionResponse(BaseModel):
@@ -147,6 +150,9 @@ async def create_session(req: CreateSessionRequest):
         "flow_spec": flow_spec,
         "status": "ready",
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "llm_provider": req.llm_provider,
+        "llm_model": req.llm_model,
+        "stt_language": (req.stt_language or "").strip() or None,
     }
 
     logger.info(
@@ -188,14 +194,15 @@ async def get_session_transcript(session_id: str):
 
     # 2. Live frame-level collector (most up-to-date during the call)
     if dynamic_exam._CURRENT_SESSION_ID == session_id:
+        latency = dynamic_exam.get_last_turn_latency()
         live = dynamic_exam.get_live_transcript()
         if live:
-            return {"turns": live, "final": False}
+            return {"turns": live, "final": False, "last_turn_latency": latency}
         # 3. Fall back to LLMContext if collector empty (e.g. before STT)
         ctx_turns = dynamic_exam.get_current_transcript()
-        return {"turns": ctx_turns, "final": False}
+        return {"turns": ctx_turns, "final": False, "last_turn_latency": latency}
 
-    return {"turns": [], "final": False}
+    return {"turns": [], "final": False, "last_turn_latency": None}
 
 
 @app.get("/api/sessions/{session_id}/report")
@@ -215,14 +222,17 @@ _webrtc_handler = SmallWebRTCRequestHandler()
 
 
 def _build_transport(connection: SmallWebRTCConnection) -> SmallWebRTCTransport:
+    # RNNoise strips steady-state background noise (fans, HVAC, hum) from the
+    # mic feed before it reaches VAD/STT. Documented free alternative to Krisp
+    # VIVA — cuts the spurious "Hello?" / "Yeah." hallucinations that ElevenLabs
+    # scribe_v2 produces from ambient noise.
     return SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
             audio_in_enabled=True,
+            audio_in_filter=RNNoiseFilter(),
             audio_out_enabled=True,
             video_out_enabled=False,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            turn_analyzer=LocalSmartTurnAnalyzerV3(),
         ),
     )
 
@@ -247,6 +257,9 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             flow_spec=s["flow_spec"],
             custom_grading_prompt=s.get("custom_grading_prompt"),
             student_name=s.get("student_name"),
+            llm_provider=s.get("llm_provider", "google"),
+            llm_model=s.get("llm_model", "gemini-3.5-flash"),
+            stt_language=s.get("stt_language", "en"),
         )
     except Exception:
         logger.exception(f"bot run failed for session {session_id}")

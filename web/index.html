@@ -383,11 +383,31 @@
           <label>LLM Model</label>
           <select id="llm-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
             <option value="google|gemini-3.5-flash" selected>Gemini 3.5 Flash — best instruction-following (recommended)</option>
-            <option value="google|gemini-3.1-flash-lite">Gemini 3.1 Flash Lite — fastest · cheapest</option>
-            <option value="google|gemini-2.5-flash">Gemini 2.5 Flash — older</option>
+            <option value="google|gemini-2.5-flash">Gemini 2.5 Flash — older but stable</option>
             <option value="groq|llama-3.3-70b-versatile">Groq · Llama 3.3 70B — ultra-low latency (&lt;100ms TTFT)</option>
           </select>
           <div class="sub" style="margin-top:4px;font-size:11px">Groq requires GROQ_API_KEY in .env</div>
+
+          <label style="margin-top:14px">STT Provider</label>
+          <select id="stt-provider-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="cartesia" selected>Cartesia · Ink Whisper — cheapest, no noise hallucinations (recommended)</option>
+            <option value="deepgram">Deepgram · Nova-3 — best for proper nouns, domain keyterms boosted</option>
+            <option value="elevenlabs">ElevenLabs · Scribe v2 Realtime — original (legacy, more bugs)</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Each provider needs its own API key in .env (CARTESIA_API_KEY / DEEPGRAM_API_KEY / ELEVENLABS_API_KEY).</div>
+
+          <label style="margin-top:14px">TTS Voice (Cartesia)</label>
+          <select id="tts-voice-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="e07c00bc-4134-4eae-9ea4-1a55fb45746b" selected>Examiner — warm, neutral (current default)</option>
+            <option value="71a7ad14-091c-4e8e-a314-022ece01c121">British Reading Lady — calm, articulate (Pipecat default)</option>
+            <option value="c45bc5ec-dc68-4feb-8829-6e6b2748095d">Narrator — clear, storytelling</option>
+            <option value="7cf0e2b1-8daf-4fe4-89ad-f6039398f359">Male Character — expressive</option>
+            <option value="a5136bf9-224c-4d76-b823-52bd5efcffcc">Jameson — American English, voice-agent</option>
+            <option value="a0e99841-438c-4a64-b679-ae501e7d6091">Barbershop Man — friendly American</option>
+            <option value="2ee87190-8f84-4925-97da-e52547f9462c">Child — younger tone</option>
+            <option value="79a125e8-cd45-4c13-8a67-188112f4dd22">British Lady — formal</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Paste any Cartesia voice ID from the dashboard to use a different voice.</div>
 
           <label style="margin-top:14px">STT Language</label>
           <select id="stt-language-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
@@ -400,7 +420,7 @@
             <option value="ar">Arabic</option>
             <option value="">Auto-detect (may mis-detect on disfluencies)</option>
           </select>
-          <div class="sub" style="margin-top:4px;font-size:11px">Locks ElevenLabs STT to a single language; prevents transcripts flipping to Russian/Hindi/etc.</div>
+          <div class="sub" style="margin-top:4px;font-size:11px">Locks STT to a single language; prevents transcripts flipping to Russian/Hindi/etc.</div>
 
           <label style="margin-top:14px">Custom Grading Prompt</label>
           <textarea id="grading-prompt" class="adv" placeholder="loading default..."></textarea>
@@ -561,6 +581,99 @@
     $('grading-prompt').value = $('grading-prompt').dataset.default || '';
   };
 
+  // ─── Populate Cartesia voice dropdown from server ───────────────────────
+  // Server caches the full Cartesia voice library; we group by language +
+  // country so an exam in any region can pick a native voice. The current
+  // selection (a custom voice ID not in the public list) is preserved at
+  // the top so teachers keep their default unless they change it.
+  (async () => {
+    const sel = $('tts-voice-select');
+    if (!sel) return;
+    const currentValue = sel.value;
+    const currentLabel = sel.options[sel.selectedIndex]?.text || '';
+    try {
+      const r = await fetch('/api/cartesia-voices');
+      const j = await r.json();
+      const voices = (j.voices || []).filter(v => v.id && v.name);
+      if (!voices.length) return;
+
+      // Locale labels — friendlier than ISO codes
+      const LOC = {
+        'en|US':'English (US)','en|GB':'English (UK)','en|IN':'English (Indian)',
+        'en|AU':'English (Australian)','en|NZ':'English (NZ)','en|CA':'English (Canadian)',
+        'en|ZA':'English (S. African)','en|IE':'English (Irish)',
+        'hi|':'Hindi','hi|IN':'Hindi',
+        'te|':'Telugu','te|IN':'Telugu',
+        'ta|':'Tamil',
+        'es|ES':'Spanish (Spain)','es|MX':'Spanish (Mexico)','es|AR':'Spanish (Argentina)',
+        'fr|FR':'French (France)','fr|CA':'French (Canadian)',
+        'de|':'German','de|DE':'German',
+        'pt|BR':'Portuguese (Brazil)','pt|PT':'Portuguese (Portugal)',
+        'it|':'Italian','it|IT':'Italian',
+        'ja|':'Japanese','ja|JP':'Japanese',
+        'ko|':'Korean','ko|KR':'Korean',
+        'zh|':'Chinese','zh|CN':'Chinese',
+        'ar|':'Arabic','he|':'Hebrew','tr|':'Turkish','th|':'Thai',
+        'pl|':'Polish','nl|':'Dutch','sv|':'Swedish','ru|':'Russian',
+        'tl|':'Tagalog',
+      };
+      const labelFor = (lang, country) => {
+        const key = `${lang || ''}|${country || ''}`;
+        if (LOC[key]) return LOC[key];
+        const lonly = `${lang || ''}|`;
+        if (LOC[lonly]) return LOC[lonly] + (country ? ` (${country})` : '');
+        return (lang || 'Other').toUpperCase() + (country ? ` (${country})` : '');
+      };
+
+      // Group voices
+      const groups = {};
+      for (const v of voices) {
+        const g = labelFor(v.language, v.country);
+        (groups[g] ||= []).push(v);
+      }
+      // Group order: English locales first, then Hindi & Indic, then alphabetical
+      const ORDER = [
+        'English (US)','English (Indian)','English (UK)','English (Australian)',
+        'English (NZ)','English (Canadian)','English (S. African)','English (Irish)',
+        'Hindi','Telugu','Tamil',
+      ];
+      const orderedGroups = [
+        ...ORDER.filter(g => groups[g]),
+        ...Object.keys(groups).filter(g => !ORDER.includes(g)).sort(),
+      ];
+
+      // Build new options. Preserve current selection as the first option
+      // (only if it doesn't already appear in the fetched list).
+      const fetchedIds = new Set(voices.map(v => v.id));
+      const frag = document.createDocumentFragment();
+      if (currentValue && !fetchedIds.has(currentValue)) {
+        const o = document.createElement('option');
+        o.value = currentValue;
+        o.textContent = currentLabel || `Custom voice (${currentValue.slice(0,8)}…)`;
+        frag.appendChild(o);
+      }
+      for (const gName of orderedGroups) {
+        const og = document.createElement('optgroup');
+        og.label = `${gName} — ${groups[gName].length} voice${groups[gName].length === 1 ? '' : 's'}`;
+        for (const v of groups[gName].sort((a, b) => a.name.localeCompare(b.name))) {
+          const o = document.createElement('option');
+          o.value = v.id;
+          const genderTag = v.gender === 'masculine' ? ' ♂' : v.gender === 'feminine' ? ' ♀' : '';
+          o.textContent = `${v.name}${genderTag}`;
+          o.title = v.description || '';
+          og.appendChild(o);
+        }
+        frag.appendChild(og);
+      }
+      sel.replaceChildren(frag);
+      // Restore selection
+      if (currentValue) sel.value = currentValue;
+      console.log(`Loaded ${voices.length} Cartesia voices across ${orderedGroups.length} groups`);
+    } catch (e) {
+      console.warn('Cartesia voice fetch failed, keeping static fallback list', e);
+    }
+  })();
+
   // ─── Generate flow ──────────────────────────────────────────────────────
   $('generate-btn').onclick = async () => {
     const question = $('question').value.trim();
@@ -571,7 +684,9 @@
     const defaultPrompt = $('grading-prompt').dataset.default || '';
     const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
     const [llm_provider, llm_model] = ($('llm-select').value || 'google|gemini-3.5-flash').split('|');
+    const stt_provider = ($('stt-provider-select')?.value ?? 'cartesia');
     const stt_language = ($('stt-language-select')?.value ?? 'en');
+    const tts_voice = ($('tts-voice-select')?.value ?? 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
 
     $('generate-btn').disabled = true;
     setStatus('Generating flow…');
@@ -582,7 +697,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_language }),
+        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice }),
       });
       if (!r.ok) {
         const err = await r.json();

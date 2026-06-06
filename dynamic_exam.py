@@ -64,6 +64,7 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     InterruptionFrame,
     LLMFullResponseStartFrame,
+    LLMTextFrame,
     StartFrame,
     EndFrame,
     CancelFrame,
@@ -81,8 +82,20 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
+# Kept-but-unused imports — used by the commented-out turn-management config
+# in run_bot. Leave imported so re-enabling lines is a no-op edit.
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_turn_strategies import (
+    UserTurnStrategies,
+    FilterIncompleteUserTurnStrategies,
+)
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
+from pipecat.turns.user_mute import (
+    MuteUntilFirstBotCompleteUserMuteStrategy,
+    FunctionCallUserMuteStrategy,
+)
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
@@ -91,6 +104,9 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.cartesia.stt import CartesiaSTTService
+# Deepgram is lazy-imported inside _build_stt to avoid hard dependency on the
+# `deepgram` SDK extra when the user picks a different STT provider.
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.groq.llm import GroqLLMService
@@ -205,8 +221,18 @@ def _load_cartesia_keys() -> list[str]:
     return [k for k in candidates if k and k.strip()]
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# KEPT-BUT-UNUSED in default config (commented out of the active pipeline /
+# STT factory). Each class below was added to chase a specific symptom over
+# several sessions; the canonical Pipecat-flows config in run_bot doesn't
+# need them. Leave the code so re-enabling is a 1-line edit if a symptom
+# returns. See run_bot for the commented config blocks.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 class SmartTurnElevenLabsSTT(ElevenLabsRealtimeSTTService):
-    """ElevenLabs Realtime STT with a session-started gate for MANUAL commits.
+    """[Active only when stt_provider='elevenlabs'] ElevenLabs Realtime STT
+    with a session-started gate for MANUAL commits.
 
     ElevenLabs' WebSocket is TCP-open ~0.7 s before it sends `session_started`.
     If a VADUserStoppedSpeakingFrame arrives in that window (e.g. user speaks
@@ -456,7 +482,8 @@ def get_last_turn_latency() -> dict | None:
 
 
 class TurnLatencyTracker(FrameProcessor):
-    """Tracks per-turn latency and logs a breakdown after each bot response starts.
+    """[UNUSED — not in active pipeline; was emitting no logs in practice]
+    Tracks per-turn latency and logs a breakdown after each bot response starts.
 
     Timing model:
       vad_stop_at        — user stopped speaking (set by SmartTurnElevenLabsSTT)
@@ -502,7 +529,9 @@ class TurnLatencyTracker(FrameProcessor):
 
 
 class BargeinGuard(FrameProcessor):
-    """Suppress LLM re-runs from in-flight function calls when the user barges in.
+    """[UNUSED — not in active pipeline; problem now solved by
+    filter_incomplete_user_turns gating bot responses on the ✓ marker]
+    Suppress LLM re-runs from in-flight function calls when the user barges in.
 
     Why: `FunctionCallResultFrame` is an `UninterruptibleFrame` — it survives
     `InterruptionFrame`. If `advance_from_probe` (or any flow function) finishes
@@ -554,7 +583,9 @@ class BargeinGuard(FrameProcessor):
 
 
 class PlaceholderFilter(FrameProcessor):
-    """Drop bot text frames whose content is a known LLM placeholder string.
+    """[UNUSED — not in active pipeline; the "Empty Message" symptom was a
+    Flash-Lite quirk, doesn't recur on gemini-3.5-flash]
+    Drop bot text frames whose content is a known LLM placeholder string.
 
     Why: Gemini occasionally interprets "wait silently after a function call"
     instructions by emitting literal placeholder text like "Empty Message",
@@ -590,6 +621,51 @@ class PlaceholderFilter(FrameProcessor):
                     f"{getattr(frame, 'text', '')!r} (would have spoken/logged)"
                 )
                 return  # do not forward
+
+        await self.push_frame(frame, direction)
+
+
+class MarkerStripFilter(FrameProcessor):
+    """Belt-and-braces strip of ✓ / ○ / ◐ turn-completion markers from text frames.
+
+    Workaround for a confirmed upstream issue where
+    ``UserTurnCompletionLLMServiceMixin._push_turn_text`` doesn't reliably
+    consume the leading marker on the ``GoogleLLMService`` streaming path
+    when ``filter_incomplete_user_turns=True``. Symptom (seen in session
+    20260606_032629_5a8f63): bot turns appear in the transcript and TTS
+    feed as ``"✓ Hello..."`` or just ``"○"`` / ``"◐"`` on their own.
+
+    Place between the LLM and the TTS service. Removes the marker from
+    LLMTextFrame / TTSTextFrame / TextFrame and drops bare-marker frames
+    so the TTS never speaks them.
+
+    Idempotent: if the marker has already been stripped upstream, this is
+    a no-op. Strips at most one leading marker per frame.
+    """
+
+    _MARKERS: tuple[str, ...] = ("✓", "○", "◐")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, (LLMTextFrame, TTSTextFrame, TextFrame)):
+            text = getattr(frame, "text", "") or ""
+            stripped = text.lstrip()
+            for marker in self._MARKERS:
+                if stripped.startswith(marker):
+                    stripped = stripped[len(marker):].lstrip()
+                    break  # only one marker per turn
+            if stripped != text:
+                logger.debug(
+                    f"MarkerStripFilter: stripped marker from "
+                    f"{type(frame).__name__}; before={text!r} after={stripped!r}"
+                )
+                frame.text = stripped
+            # Drop the frame entirely if all that's left is whitespace —
+            # this is the "bare ○" / "bare ◐" suppress-only case where
+            # the LLM emitted nothing but the marker.
+            if not (frame.text or "").strip():
+                return
 
         await self.push_frame(frame, direction)
 
@@ -2087,13 +2163,137 @@ class ProbeAttemptCounter(FrameProcessor):
 
 
 
+def _build_stt(
+    stt_provider: str,
+    stt_language: str | None,
+    keyterms: list[str] | None = None,
+):
+    """Instantiate the configured STT service.
+
+    Supported providers:
+      - "elevenlabs": SmartTurnElevenLabsSTT wrapping scribe_v2_realtime
+        (includes our commit cooldown, echo flush, auto-reconnect glue).
+      - "cartesia":   CartesiaSTTService with ink-whisper (cheap, low-latency,
+        no Whisper-family hallucinations from noise; native keepalive).
+      - "deepgram":   DeepgramSTTService with nova-3 (best keyterm-boosting
+        for domain vocabulary).
+
+    Language defaults to 'en'. Pass empty string / None to enable auto-detect
+    (only honoured by services that support it).
+    """
+    lang_code = (stt_language or "").strip() or None
+    provider = (stt_provider or "elevenlabs").lower()
+
+    if provider == "cartesia":
+        if not os.getenv("CARTESIA_API_KEY"):
+            raise RuntimeError("CARTESIA_API_KEY not set in .env (required for Cartesia STT)")
+        logger.info(
+            f"STT provider: cartesia / ink-whisper | "
+            f"language={lang_code or 'auto'}"
+        )
+        return CartesiaSTTService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            settings=CartesiaSTTService.Settings(
+                model="ink-whisper",
+                language=lang_code or "en",
+            ),
+        )
+
+    if provider == "deepgram":
+        if not os.getenv("DEEPGRAM_API_KEY"):
+            raise RuntimeError("DEEPGRAM_API_KEY not set in .env (required for Deepgram STT)")
+        try:
+            from pipecat.services.deepgram.stt import DeepgramSTTService, LiveOptions
+        except ImportError as e:
+            raise RuntimeError(
+                "Deepgram STT not installed — run: uv add 'pipecat-ai[deepgram]'"
+            ) from e
+        # Nova-3 supports keyterm-boosting for domain-specific vocabulary —
+        # fixes the "child marriage" → "chat manage" class of mis-transcription.
+        kt = keyterms or []
+        logger.info(
+            f"STT provider: deepgram / nova-3 | language={lang_code or 'en'} | "
+            f"keyterms={len(kt)} ({kt[:8]}{'…' if len(kt) > 8 else ''})"
+        )
+        return DeepgramSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            live_options=LiveOptions(
+                model="nova-3",
+                language=lang_code or "en",
+                keyterm=kt or None,
+                smart_format=True,
+                punctuate=True,
+            ),
+        )
+
+    # Default: ElevenLabs
+    if provider != "elevenlabs":
+        logger.warning(
+            f"Unknown stt_provider {stt_provider!r}, falling back to ElevenLabs"
+        )
+    if not os.getenv("ELEVENLABS_API_KEY"):
+        raise RuntimeError("ELEVENLABS_API_KEY not set in .env (required for ElevenLabs STT)")
+    if lang_code:
+        logger.info(f"STT provider: elevenlabs / scribe_v2_realtime | language locked to {lang_code!r}")
+    else:
+        logger.info("STT provider: elevenlabs / scribe_v2_realtime | language: auto-detect")
+    return SmartTurnElevenLabsSTT(
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        commit_strategy=CommitStrategy.MANUAL,
+        params=ElevenLabsRealtimeSTTService.InputParams(
+            language_code=lang_code,
+        ),
+        settings=ElevenLabsRealtimeSTTService.Settings(
+            model="scribe_v2_realtime",
+        ),
+    )
+
+
+# Tokens that don't add domain info to STT keyterms biasing. Used by
+# _extract_keyterms for the Deepgram provider.
+_STT_STOPWORDS: set[str] = {
+    "what", "when", "where", "which", "while", "would", "could", "should",
+    "their", "there", "these", "those", "this", "that", "with", "from",
+    "into", "your", "yours", "about", "ask", "asking", "tell", "telling",
+    "student", "students", "answer", "answers", "examiner", "exam", "topic",
+    "probe", "prompt", "scaffold", "respond", "response", "based", "they",
+    "them", "then", "than", "have", "has", "had", "been", "being", "will",
+    "you", "yes", "the", "and", "for", "are", "but", "not", "one", "all",
+    "any", "out", "off", "use", "way", "may", "say", "see",
+}
+
+
+def _extract_keyterms_from_flowspec(flow_spec: FlowSpec | None, limit: int = 100) -> list[str]:
+    """Pull domain vocabulary from the exam's FlowSpec to bias STT models
+    that support keyterm-prompting (Deepgram nova-3). For ElevenLabs and
+    Cartesia we currently don't pass keyterms — Cartesia's API doesn't expose
+    them, and ElevenLabs's keyterm field has a small documented benefit."""
+    if not flow_spec:
+        return []
+    pool: set[str] = set()
+    sources = [flow_spec.topic, flow_spec.exam_question]
+    for p in flow_spec.probe_pool:
+        sources.append(p.prompt)
+        if p.scaffold:
+            sources.append(p.scaffold)
+    for text in sources:
+        for w in re.findall(r"[A-Za-z][A-Za-z\-']{3,}", text):
+            lw = w.lower()
+            if lw in _STT_STOPWORDS or len(lw) > 30:
+                continue
+            pool.add(lw)
+    return sorted(pool)[:limit]
+
+
 async def run_bot(
     transport: BaseTransport,
     runner_args: RunnerArguments,
     session_id: str,
     llm_provider: str = "google",
     llm_model: str = "gemini-3.5-flash",
+    stt_provider: str = "elevenlabs",
     stt_language: str | None = "en",
+    tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
 ):
     # Per-session log file — captures every loguru log line emitted during this
     # session so we can post-mortem any one run without scrolling stdout.
@@ -2108,28 +2308,11 @@ async def run_bot(
 
     logger.info(
         f"Starting dynamic oral exam bot | session={session_id} | "
-        f"llm={llm_provider}:{llm_model}"
+        f"llm={llm_provider}:{llm_model} | stt={stt_provider}"
     )
 
-    # Lock STT to a single language by default. ElevenLabs scribe_v2_realtime
-    # auto-detects when language_code is None, which means a momentary
-    # disfluency or accent can flip the transcript into Russian/Hindi/etc.
-    # Pass stt_language=None (or empty) explicitly to re-enable auto-detect.
-    stt_lang_code = (stt_language or "").strip() or None
-    if stt_lang_code:
-        logger.info(f"STT locked to language: {stt_lang_code!r}")
-    else:
-        logger.info("STT language: auto-detect (no lock)")
-    stt = SmartTurnElevenLabsSTT(
-        api_key=os.getenv("ELEVENLABS_API_KEY"),
-        commit_strategy=CommitStrategy.MANUAL,  # SmartTurn v3 controls commit timing
-        params=ElevenLabsRealtimeSTTService.InputParams(
-            language_code=stt_lang_code,
-        ),
-        settings=ElevenLabsRealtimeSTTService.Settings(
-            model="scribe_v2_realtime",
-        ),
-    )
+    keyterms = _extract_keyterms_from_flowspec(_FLOW_SPEC)
+    stt = _build_stt(stt_provider, stt_language, keyterms=keyterms)
 
     cartesia_keys = _load_cartesia_keys()
     if not cartesia_keys:
@@ -2140,10 +2323,11 @@ async def run_bot(
         f"Cartesia TTS configured with {len(cartesia_keys)} key(s): "
         f"primary={FallbackCartesiaTTSService._mask(cartesia_keys[0])}"
         + (f", fallbacks={[FallbackCartesiaTTSService._mask(k) for k in cartesia_keys[1:]]}" if len(cartesia_keys) > 1 else " (no fallbacks)")
+        + f" | voice={tts_voice}"
     )
     tts = FallbackCartesiaTTSService(
         api_keys=cartesia_keys,
-        voice_id="e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+        voice_id=tts_voice,
     )
 
     if llm_provider == "groq":
@@ -2161,28 +2345,67 @@ async def run_bot(
         )
 
     context = LLMContext()
-    # Per Pipecat docs (smart-turn-overview + speech-input):
-    #   • Keep VADParams(stop_secs=0.2) — SmartTurn v3 was trained on this; raising
-    #     it produces unpredictable COMPLETE/INCOMPLETE decisions.
-    #   • start_secs=0.3 (up from 0.2 default) so brief breaths / clicks don't
-    #     register as speech onset.
-    #   • MinWordsUserTurnStartStrategy(min_words=2) — while the bot is speaking,
-    #     ignore barge-ins under 2 words. Filters phantom "Hello?" / "Yeah." /
-    #     "Okay." that ElevenLabs scribe_v2 hallucinates from background noise.
-    #     When the bot is idle, 1 word still starts a turn (so normal turn-taking
-    #     stays responsive).
-    #   • stop strategy left unset → SmartTurn v3 is the default (since v0.0.102).
+    # ─── Turn-taking config (canonical Pipecat-flows shape) ─────────────────
+    # Matches pipecat-flows/examples/insurance_quote.py verbatim. SileroVAD
+    # at defaults + boolean `filter_incomplete_user_turns=True` is the
+    # well-trodden path that the reference example uses with pipecat-flows.
+    # Avoids the marker-leak we saw with the newer strategy-based API on
+    # GoogleLLMService.
+    #
+    # ───────────── PREVIOUS (over-engineered) CONFIG — COMMENTED OUT ─────────────
+    # We accumulated layers over several sessions to fight ElevenLabs-specific
+    # quirks + Flash-Lite instruction-following failures. Most of these aren't
+    # needed once we (a) use Cartesia STT as default and (b) gemini-3.5-flash.
+    # Re-enable individual lines if a specific symptom returns.
+    # ─────────────────────────────────────────────────────────────────────────
+    # context_aggregator = LLMContextAggregatorPair(
+    #     context,
+    #     user_params=LLMUserAggregatorParams(
+    #         vad_analyzer=SileroVADAnalyzer(params=VADParams(
+    #             stop_secs=0.2,
+    #             start_secs=0.3,
+    #             confidence=0.7,
+    #             min_volume=0.6,
+    #         )),
+    #         user_turn_strategies=FilterIncompleteUserTurnStrategies(
+    #             start=[MinWordsUserTurnStartStrategy(min_words=3)],
+    #             stop=[
+    #                 TurnAnalyzerUserTurnStopStrategy(
+    #                     turn_analyzer=LocalSmartTurnAnalyzerV3(
+    #                         params=SmartTurnParams(
+    #                             stop_secs=5.0,
+    #                             pre_speech_ms=800,
+    #                             max_duration_secs=12.0,
+    #                         ),
+    #                     ),
+    #                 ),
+    #             ],
+    #             config=UserTurnCompletionConfig(
+    #                 incomplete_short_timeout=5.0,
+    #                 incomplete_long_timeout=10.0,
+    #             ),
+    #         ),
+    #         user_mute_strategies=[
+    #             MuteUntilFirstBotCompleteUserMuteStrategy(),
+    #             FunctionCallUserMuteStrategy(),
+    #         ],
+    #         user_turn_stop_timeout=5.0,
+    #     ),
+    # )
+
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(
-                stop_secs=0.2,
-                start_secs=0.3,
-                confidence=0.7,
-                min_volume=0.6,
-            )),
-            user_turn_strategies=UserTurnStrategies(
-                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+            vad_analyzer=SileroVADAnalyzer(),
+            filter_incomplete_user_turns=True,
+            # Defaults are 5 s / 10 s — tuned for snappy dialogue. For an oral
+            # exam where students think mid-sentence, the 5 s timer fired as a
+            # "Take your time, I'm listening" re-prompt right when the student
+            # was actually still thinking. Stretch them so a real thinking
+            # pause doesn't get nagged.
+            user_turn_completion_config=UserTurnCompletionConfig(
+                incomplete_short_timeout=12.0,   # ↑ from 5 — mid-sentence pause
+                incomplete_long_timeout=25.0,    # ↑ from 10 — "let me think"
             ),
         ),
     )
@@ -2201,28 +2424,34 @@ async def run_bot(
     rtvi = RTVIProcessor()
     audio_buffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
     attempt_counter = ProbeAttemptCounter()
-    latency_tracker = TurnLatencyTracker()
-    bargein_guard = BargeinGuard()
-    placeholder_filter = PlaceholderFilter()
+    marker_strip = MarkerStripFilter()
+    # Optional processors kept around but not in the active pipeline. Each
+    # was added to chase a specific symptom; if it recurs, instantiate the
+    # one you need and add it back to the Pipeline below.
+    # latency_tracker = TurnLatencyTracker()
+    # bargein_guard = BargeinGuard()
+    # placeholder_filter = PlaceholderFilter()
 
     pipeline = Pipeline([
         transport.input(),
         rtvi,
         stt,
-        latency_tracker,
+        # latency_tracker,             # observability — was emitting no logs
         attempt_counter,
         user_transcript_collector,     # captures TranscriptionFrame BEFORE the user
                                         # aggregator consumes it
         context_aggregator.user(),
         llm,
-        placeholder_filter,            # drops "Empty Message" / "(silent)" / etc.
-                                        # before TTS speaks them
+        marker_strip,                  # strips ✓/○/◐ from text frames — works
+                                        # around upstream bug in GoogleLLMService
+                                        # marker mixin (see MarkerStripFilter doc)
+        # placeholder_filter,          # only relevant for Flash-Lite "Empty Message" leak
         tts,
         bot_transcript_collector,      # captures TTSTextFrame after TTS
         transport.output(),
         audio_buffer,
-        bargein_guard,                 # neutralises FunctionCallResultFrame.run_llm
-                                        # when barge-in is in flight
+        # bargein_guard,               # FunctionCallResultFrame race — solved by
+                                        # filter_incomplete_user_turns gating responses
         context_aggregator.assistant(),
     ])
 
@@ -2340,6 +2569,16 @@ async def run_bot(
         logger.info("Student disconnected")
         await task.cancel()
 
+    # Safety net: fires when a user turn was opened but no usable transcript
+    # arrived within `user_turn_stop_timeout` (default 5s). With Cartesia STT
+    # this can happen if the audio track briefly hiccups. Don't crash — just
+    # log it so we can see in the per-session log.
+    @context_aggregator.user().event_handler("on_user_turn_stop_timeout")
+    async def on_user_turn_stop_timeout(aggregator):
+        logger.warning(
+            "User turn stop-timeout fired (turn opened but no final transcript)"
+        )
+
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     try:
         await runner.run(task)
@@ -2385,7 +2624,9 @@ async def run_session(
     student_name: str | None = None,
     llm_provider: str = "google",
     llm_model: str = "gemini-3.5-flash",
+    stt_provider: str = "elevenlabs",
     stt_language: str | None = "en",
+    tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
 ) -> None:
     """Server-friendly entry: caller provides transport, session_id, and a
     pre-generated FlowSpec. CLI mode uses bot() instead."""
@@ -2401,7 +2642,9 @@ async def run_session(
     await run_bot(
         transport, runner_args, session_id,
         llm_provider=llm_provider, llm_model=llm_model,
+        stt_provider=stt_provider,
         stt_language=stt_language,
+        tts_voice=tts_voice,
     )
 
 

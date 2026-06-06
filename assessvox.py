@@ -17,11 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,6 +86,96 @@ if WEB_DIR.exists():
 
 # ─── Session endpoints ────────────────────────────────────────────────────────
 
+# Models that don't follow our long multi-step system prompts well enough.
+# Repeatedly observed in logs: 3-attempt-cap rule ignored, autocompletion of
+# student fragments, phantom function calls. Coerced to gemini-3.5-flash.
+_LLM_MODEL_BLOCKLIST = frozenset({"gemini-3.1-flash-lite"})
+_LLM_MODEL_FALLBACK = "gemini-3.5-flash"
+
+
+def _coerce_llm_model(provider: str, model: str) -> str:
+    if (provider or "").lower() == "google" and model in _LLM_MODEL_BLOCKLIST:
+        logger.warning(
+            f"Coercing LLM {model!r} → {_LLM_MODEL_FALLBACK!r} "
+            "(blocked for poor instruction-following on long flow prompts)"
+        )
+        return _LLM_MODEL_FALLBACK
+    return model
+
+
+# ─── Cartesia voices cache ──────────────────────────────────────────────────
+# Server-side cache for the Cartesia voice library so the UI dropdown can
+# populate dynamically (including new Indian / regional voices) without
+# pelting the Cartesia API on every page load.
+
+_CARTESIA_VOICES_CACHE: list[dict[str, Any]] = []
+_CARTESIA_VOICES_FETCHED_AT: float = 0.0
+_CARTESIA_VOICES_TTL_SECS: float = 3600.0   # refresh hourly
+_CARTESIA_API_VERSION = "2026-03-01"
+
+
+async def _fetch_cartesia_voices() -> list[dict[str, Any]]:
+    """Page through Cartesia's GET /voices and return a flat list.
+
+    Each returned dict has keys: id, name, description, gender, language,
+    country. Only public voices are included. Raises on HTTP error.
+    """
+    api_key = os.getenv("CARTESIA_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("CARTESIA_API_KEY not set in .env")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Cartesia-Version": _CARTESIA_API_VERSION,
+    }
+    voices: list[dict[str, Any]] = []
+    cursor: str | None = None
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for _ in range(20):  # safety cap — 20 × 100 = 2000 voices max
+            params = {"limit": "100"}
+            if cursor:
+                params["starting_after"] = cursor
+            r = await client.get(
+                "https://api.cartesia.ai/voices",
+                headers=headers,
+                params=params,
+            )
+            r.raise_for_status()
+            body = r.json()
+            for v in body.get("data", []):
+                voices.append({
+                    "id": v.get("id"),
+                    "name": v.get("name") or "(unnamed)",
+                    "description": v.get("description") or "",
+                    "gender": v.get("gender"),
+                    "language": v.get("language"),
+                    "country": v.get("country"),
+                })
+            if not body.get("has_more"):
+                break
+            cursor = body.get("next_page")
+            if not cursor:
+                break
+    return voices
+
+
+async def _get_cached_cartesia_voices() -> list[dict[str, Any]]:
+    """Return cached voices, refreshing if the TTL has expired."""
+    global _CARTESIA_VOICES_CACHE, _CARTESIA_VOICES_FETCHED_AT
+    now = time.monotonic()
+    if (
+        _CARTESIA_VOICES_CACHE
+        and (now - _CARTESIA_VOICES_FETCHED_AT) < _CARTESIA_VOICES_TTL_SECS
+    ):
+        return _CARTESIA_VOICES_CACHE
+    voices = await _fetch_cartesia_voices()
+    _CARTESIA_VOICES_CACHE = voices
+    _CARTESIA_VOICES_FETCHED_AT = now
+    logger.info(f"Cartesia voices fetched: {len(voices)} total")
+    return voices
+
+
 class CreateSessionRequest(BaseModel):
     question: str
     duration_minutes: int = 6
@@ -91,9 +183,18 @@ class CreateSessionRequest(BaseModel):
     student_name: str | None = None
     llm_provider: str = "google"
     llm_model: str = "gemini-3.5-flash"
+    # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
+    # no Whisper hallucinations), "deepgram" (nova-3 — best keyterm-boost
+    # for domain vocabulary), or "elevenlabs" (scribe_v2_realtime, legacy
+    # path with the commit/echo-flush workarounds).
+    stt_provider: str = "cartesia"
     # ISO-639-1 STT language. "en" locks transcripts to English (the default).
-    # Empty string / None re-enables ElevenLabs auto-detect.
+    # Empty string / None re-enables auto-detect (where supported).
     stt_language: str | None = "en"
+    # Cartesia voice ID for TTS. Default is the "Examiner" voice we've been
+    # using; the UI dropdown exposes a curated set, but any valid Cartesia
+    # voice ID works.
+    tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b"
 
 
 class CreateSessionResponse(BaseModel):
@@ -106,6 +207,32 @@ async def get_default_grading_prompt():
     """Return the default grading prompt (and the dimension guide) so the
     advanced-options panel can show it as editable default text."""
     return {"prompt": GRADING_PROMPT, "dimension_guide": DIMENSION_GUIDE}
+
+
+@app.get("/api/cartesia-voices", response_model=dict)
+async def get_cartesia_voices():
+    """Return the Cartesia voice library so the UI can build a region-grouped
+    dropdown dynamically. Cached for an hour on the server.
+
+    Falls back to a small curated list on API failure so the UI never breaks.
+    """
+    try:
+        voices = await _get_cached_cartesia_voices()
+        return {"voices": voices, "source": "api"}
+    except Exception as e:
+        logger.warning(f"Cartesia voices API fetch failed, using fallback: {e}")
+        return {
+            "voices": [
+                {"id": "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+                 "name": "Examiner (default)", "language": "en", "country": "US",
+                 "gender": "feminine", "description": "Warm, neutral examiner voice"},
+                {"id": "71a7ad14-091c-4e8e-a314-022ece01c121",
+                 "name": "British Reading Lady", "language": "en", "country": "GB",
+                 "gender": "feminine", "description": "Calm, articulate"},
+            ],
+            "source": "fallback",
+            "error": str(e),
+        }
 
 
 @app.post("/api/sessions", response_model=CreateSessionResponse)
@@ -151,8 +278,11 @@ async def create_session(req: CreateSessionRequest):
         "status": "ready",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "llm_provider": req.llm_provider,
-        "llm_model": req.llm_model,
+        "llm_model": _coerce_llm_model(req.llm_provider, req.llm_model),
+        "stt_provider": (req.stt_provider or "cartesia").strip().lower(),
         "stt_language": (req.stt_language or "").strip() or None,
+        "tts_voice": (req.tts_voice or "").strip()
+                     or "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
     }
 
     logger.info(
@@ -222,15 +352,15 @@ _webrtc_handler = SmallWebRTCRequestHandler()
 
 
 def _build_transport(connection: SmallWebRTCConnection) -> SmallWebRTCTransport:
-    # RNNoise strips steady-state background noise (fans, HVAC, hum) from the
-    # mic feed before it reaches VAD/STT. Documented free alternative to Krisp
-    # VIVA — cuts the spurious "Hello?" / "Yeah." hallucinations that ElevenLabs
-    # scribe_v2 produces from ambient noise.
+    # RNNoise was added to cut ElevenLabs scribe_v2 hallucinations from
+    # background noise. With Cartesia STT as default it's not needed, and
+    # its 16k↔48k resampling can degrade fricatives ("ch" vs "j"). Re-enable
+    # by uncommenting `audio_in_filter=RNNoiseFilter()` if noise issues recur.
     return SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
             audio_in_enabled=True,
-            audio_in_filter=RNNoiseFilter(),
+            # audio_in_filter=RNNoiseFilter(),   # see comment above
             audio_out_enabled=True,
             video_out_enabled=False,
         ),
@@ -259,7 +389,9 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             student_name=s.get("student_name"),
             llm_provider=s.get("llm_provider", "google"),
             llm_model=s.get("llm_model", "gemini-3.5-flash"),
+            stt_provider=s.get("stt_provider", "cartesia"),
             stt_language=s.get("stt_language", "en"),
+            tts_voice=s.get("tts_voice", "e07c00bc-4134-4eae-9ea4-1a55fb45746b"),
         )
     except Exception:
         logger.exception(f"bot run failed for session {session_id}")

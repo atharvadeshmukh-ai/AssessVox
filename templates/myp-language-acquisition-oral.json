@@ -1,0 +1,148 @@
+{
+  "id": "myp-language-acquisition-oral",
+  "programme": "MYP",
+  "subject": "Language Acquisition",
+  "level": "Phase 3-5",
+  "assessment_type": "Individual Speaking Assessment",
+  "display_name": "MYP Language Acquisition — Individual Speaking",
+  "description": "Internally assessed oral interaction (4-6 min). Teacher picks a thought-provoking question from the library or writes a custom one. Bot probes for reasoning, examples, and counter-perspectives. Aligned to MYP Criterion C (Communicating).",
+  "flow_spec": {
+    "topic": "MYP Language Acquisition oral interaction",
+    "exam_question": "Should governments invest more in renewable energy, even if it raises household costs in the short term? Why or why not?",
+    "duration_minutes": 6,
+    "examiner_tone": "warm, encouraging, age-appropriate for an 11-16 year old MYP student",
+    "skills_assessed": [
+      "Communicating ideas with clarity",
+      "Using language structures appropriate for the context",
+      "Showing intercultural understanding",
+      "Engaging in spontaneous interaction"
+    ],
+    "redirect_when_off_topic": "That's interesting — let's bring it back to our main question.",
+    "required_probes": ["opinion_with_reason", "concrete_example"],
+    "probe_pool": [
+      {
+        "id": "opinion_with_reason",
+        "type": "question",
+        "prompt": "Ask the student to clearly state their own view on the question and give at least one reason. If they only give facts, redirect them to share an opinion.",
+        "scaffold": "What do YOU think — yes, no, or somewhere in between? Just one reason is fine."
+      },
+      {
+        "id": "concrete_example",
+        "type": "example",
+        "prompt": "Ask for a real example that supports their view — from their life, school, family, or something they've read or seen.",
+        "scaffold": "Even a small example works — something you've seen or heard."
+      },
+      {
+        "id": "counter_view",
+        "type": "counter",
+        "prompt": "Ask the student to articulate the strongest argument someone who disagrees with them would make.",
+        "scaffold": "What would someone who disagrees say? Even if you don't agree, what's their best point?"
+      },
+      {
+        "id": "comparison",
+        "type": "comparison",
+        "prompt": "Invite a side-by-side comparison: short-term vs long-term consequences, individual vs society, or here vs another country.",
+        "scaffold": "Compare two things — what's different between, say, today and ten years from now?"
+      },
+      {
+        "id": "synthesis",
+        "type": "synthesis",
+        "prompt": "Ask the student to put everything together in one short final view — like a wrap-up sentence.",
+        "scaffold": "In one sentence, what's your final answer?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student has used a vague word (\"good\", \"bad\", \"helps\"), ask them to be more precise about what they mean.",
+        "scaffold": "When you say [vague term], what specifically do you mean?"
+      }
+    ]
+  },
+  "grading_rubric": "You are an IB MYP Language Acquisition evaluator producing a HOLISTIC report on a 4-6 minute individual speaking assessment. Do not grade turn-by-turn — read the whole exam, then write one integrated judgment per dimension.\n\nTwo voices: AI EXAMINER and STUDENT. Grade ONLY the student.\n\nExam question (template-driven):\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript — authoritative source for evidence:\n{transcript}\n\nNode trace (which probes were reached):\n{node_trace}\n\nDIMENSIONS — each scored 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery)\n{dimension_guide}\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the whole exam\n  - evidence: 1-3 short student quotes from the transcript. Never quote the examiner. Never write \"Entire recording\".\n\nThen produce:\n  - headline: one sentence (≤ 20 words) overall impression\n  - summary:  4-6 sentence holistic narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps\n  - overall_score: 0-100 (weigh reasoning + examples most heavily). If metadata.cancelled is true, set to 0 and set every dimension to 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "questions": [
+    {
+      "id": "identities-renewable-energy",
+      "label": "Renewable energy vs household costs",
+      "global_context": "Globalization and Sustainability",
+      "prompt": "Should governments invest more in renewable energy, even if it raises household costs in the short term? Why or why not?",
+      "notes": "Good first question — clear binary, room for nuance, multiple angles (economic, environmental, fairness)."
+    },
+    {
+      "id": "identities-social-media-under16",
+      "label": "Banning social media for under-16s",
+      "global_context": "Identities and Relationships",
+      "prompt": "Some countries have proposed banning social media for anyone under 16. Do you think this is a good idea? Why or why not?",
+      "notes": "Highly relevant for MYP students — they have direct experience and strong intuitions."
+    },
+    {
+      "id": "identities-school-uniforms",
+      "label": "School uniforms",
+      "global_context": "Identities and Relationships",
+      "prompt": "Should schools require students to wear uniforms? What does what we wear say about who we are?",
+      "notes": "Connects clothing to identity — a Phase 3-4 friendly entry point."
+    },
+    {
+      "id": "innovation-ai-in-classrooms",
+      "label": "AI tutors in schools",
+      "global_context": "Scientific and Technical Innovation",
+      "prompt": "If an AI tutor could teach a subject as well as a human teacher, should schools use them? What's gained and what's lost?",
+      "notes": "Self-referential for AssessVox use — students often have surprisingly strong views."
+    },
+    {
+      "id": "innovation-screen-time",
+      "label": "Screen time limits",
+      "global_context": "Scientific and Technical Innovation",
+      "prompt": "Should parents set strict daily limits on how much time their children spend on screens? At what age does this stop making sense?",
+      "notes": "Personal-stake question — almost every student has an opinion."
+    },
+    {
+      "id": "fairness-homework",
+      "label": "Should homework be abolished?",
+      "global_context": "Fairness and Development",
+      "prompt": "Some schools have abolished homework entirely. Do you think this is fair to students? What are the real benefits and costs?",
+      "notes": "Tests ability to consider equity — does homework help or hurt students who don't have study support at home?"
+    },
+    {
+      "id": "fairness-voting-age",
+      "label": "Lowering the voting age",
+      "global_context": "Fairness and Development",
+      "prompt": "Should the voting age be lowered to 16? What would change if young people had a direct voice in politics?",
+      "notes": "Empowering question — student is essentially being asked about themselves."
+    },
+    {
+      "id": "globalization-language-loss",
+      "label": "English as a global language",
+      "global_context": "Globalization and Sustainability",
+      "prompt": "English has become the dominant global language. Is this a good thing for the world, or are we losing something important when smaller languages disappear?",
+      "notes": "Excellent for language acquisition — meta-question about why language learning matters."
+    },
+    {
+      "id": "space-city-vs-village",
+      "label": "City life vs village life",
+      "global_context": "Orientation in Space and Time",
+      "prompt": "If you could choose to live in a big city or a small village for the rest of your life, which would you choose? What would you gain and what would you miss?",
+      "notes": "Concrete, comparison-driven, lets students draw on their own experience."
+    },
+    {
+      "id": "space-historical-figure",
+      "label": "Lunch with a historical figure",
+      "global_context": "Orientation in Space and Time",
+      "prompt": "If you could have lunch with any one person from history, who would you pick and why? What would you ask them?",
+      "notes": "Open-ended, creative — good for shy students; lets them lead the conversation."
+    },
+    {
+      "id": "expression-art-vs-science",
+      "label": "Art vs science",
+      "global_context": "Personal and Cultural Expression",
+      "prompt": "If a school could only afford to fund either its art programs or its science programs, which should it choose? Why?",
+      "notes": "Forces a hard choice — tests reasoning more than knowledge."
+    },
+    {
+      "id": "expression-meaningful-tradition",
+      "label": "A meaningful tradition",
+      "global_context": "Personal and Cultural Expression",
+      "prompt": "Tell me about a tradition or celebration from your culture that means a lot to you. Why is it meaningful, and how would you explain it to someone who has never seen it?",
+      "notes": "Inclusive, lets every student bring their own background. Tests cultural articulation."
+    }
+  ]
+}

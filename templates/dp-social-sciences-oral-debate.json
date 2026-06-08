@@ -1,0 +1,167 @@
+{
+  "id": "dp-social-sciences-oral-debate",
+  "programme": "DP",
+  "subject": "Geography / History / Global Politics",
+  "level": "SL/HL",
+  "assessment_type": "Mock Oral Debate (school revision)",
+  "display_name": "DP Social Sciences — Mock Oral Debate",
+  "description": "Not an IB-required component, but widely used by schools as oral revision for DP Geography, History, and Global Politics. Bot acts as a Socratic examiner — pushes the student to stake a position, justify with evidence, engage with counter-perspectives, and shift between scales (local / national / global). Useful for paper-2 / paper-3 essay prep.",
+  "flow_spec": {
+    "topic": "DP Social Sciences mock oral debate — current affairs / contested topic",
+    "exam_question": "Should small island developing states be granted special veto power on international climate treaties?",
+    "duration_minutes": 8,
+    "examiner_tone": "rigorous, Socratic — the tone of a strong DP teacher who is on the student's side but won't accept easy answers",
+    "skills_assessed": [
+      "Stating a clear position with justification",
+      "Use of specific evidence (case studies, named events, named actors)",
+      "Engagement with counter-arguments",
+      "Shifting between scales — local, national, regional, global",
+      "Awareness of causation vs correlation, root causes vs symptoms"
+    ],
+    "redirect_when_off_topic": "Let's bring it back to the debate question.",
+    "required_probes": ["stance_with_reason", "evidence_cited", "counter_view"],
+    "probe_pool": [
+      {
+        "id": "stance_with_reason",
+        "type": "question",
+        "prompt": "Ask the student to clearly state their position on the question and give at least one substantive reason. If they sit on the fence, push for which side they LEAN on and why.",
+        "scaffold": "What's your position — yes, no, or it depends? And one reason."
+      },
+      {
+        "id": "evidence_cited",
+        "type": "example",
+        "prompt": "Ask the student for a SPECIFIC real-world example, case study, named event, or named actor that supports their position. Push back on vague claims — \"many countries\" is not evidence.",
+        "scaffold": "Give me a specific example — a named country, event, or moment."
+      },
+      {
+        "id": "counter_view",
+        "type": "counter",
+        "prompt": "Ask the student to articulate the STRONGEST version of the opposing argument — not a strawman. Tests whether they've engaged with the other side.",
+        "scaffold": "What's the strongest argument someone on the opposite side would make?"
+      },
+      {
+        "id": "scale_shift",
+        "type": "comparison",
+        "prompt": "Ask how the issue looks different at different scales — local, national, regional, global. Tests scale-awareness, a Geography / Global Politics core skill.",
+        "scaffold": "Does this look different from a national perspective vs a global one?"
+      },
+      {
+        "id": "historical_parallel",
+        "type": "example",
+        "prompt": "Ask if there is a HISTORICAL parallel — has this issue or something structurally similar happened before? Tests Historical-thinking + analogy.",
+        "scaffold": "Is there a historical parallel? Something similar that happened in the past?"
+      },
+      {
+        "id": "causation_vs_correlation",
+        "type": "synthesis",
+        "prompt": "Push the student on causation: are they describing a root cause or a symptom? What's the deeper structure?",
+        "scaffold": "Is what you described a root cause, or a symptom of something deeper?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student has used a contested social-science term loosely (\"democracy\", \"sovereignty\", \"development\", \"power\", \"the international community\"), push them to define it precisely in this context.",
+        "scaffold": "When you say [term] — what specifically do you mean?"
+      }
+    ]
+  },
+  "grading_rubric": "You are a DP Social Sciences teacher grading a mock oral debate (school-level revision exercise, not an IB-certified assessment). The student has engaged with a contested current-affairs or thematic question for ~8 minutes. Grade ONLY the student's contributions.\n\nDebate question:\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript:\n{transcript}\n\nNode trace:\n{node_trace}\n\nDIMENSIONS — DP Social Sciences argumentation criteria, scored 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery):\n\n  clarity       — Clear, defensible position; structured argument flow; signposting of stance.\n  reasoning     — Quality of argumentation: causation vs correlation, multi-step reasoning, ability to defend under push-back. The MAIN distinguishing dimension for this assessment.\n  examples      — Specificity of evidence: named countries, events, actors, statistics, case studies. Vague \"in many countries\" claims should score low.\n  engagement    — Willingness to engage with the strongest version of the counter-argument; intellectual courage to update or hold a position under pressure.\n  fluency       — Academic register; flow when navigating complex multi-clause reasoning.\n  pronunciation — Clarity, especially of geographical / political / historical proper nouns.\n  confidence    — Tonal range; ability to acknowledge uncertainty without losing argumentative voice.\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the debate\n  - evidence: 1-3 short student quotes\n\nThen produce:\n  - headline: one sentence (≤ 20 words)\n  - summary:  4-6 sentence narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps for argumentation\n  - overall_score: 0-100. Weight Reasoning + Examples heaviest. Cancelled = 0 + all dims 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "questions": [
+    {
+      "id": "geo-sids-climate-veto",
+      "label": "Small island states & climate veto",
+      "theme": "Geography — Environment & Power",
+      "prompt": "Should small island developing states (SIDS) be granted special veto power on international climate treaties — given that they bear the heaviest costs of climate change with the least responsibility for causing it?",
+      "image_url": null,
+      "notes": "Tests scale (local impact / global decision), evidence (Pacific SIDS, COP outcomes), and counter-argument (procedural fairness)."
+    },
+    {
+      "id": "geo-urban-vs-rural",
+      "label": "Mega-city policy bias",
+      "theme": "Geography — Urbanisation",
+      "prompt": "Have governments structurally prioritised mega-city development at the expense of rural regions — and is that justified by efficiency, or has it created the populist backlash we now see in many countries?",
+      "image_url": null,
+      "notes": "Strong evidence cases (China, India, US, UK). Causation question built in."
+    },
+    {
+      "id": "geo-migration-fortress",
+      "label": "Migration & Fortress policy",
+      "theme": "Geography — Migration",
+      "prompt": "Are wealthy nations morally entitled to maintain restrictive immigration policies given their historical role in destabilising migrant-origin countries? Use specific case studies.",
+      "image_url": null,
+      "notes": "Pushes historical-causation reasoning."
+    },
+    {
+      "id": "history-revolution-success",
+      "label": "When are revolutions successful?",
+      "theme": "History — Revolutions",
+      "prompt": "What makes a revolution \"successful\" — and by whose standards? Compare two revolutions from different centuries and argue why one succeeded by its own goals and the other did not.",
+      "image_url": null,
+      "notes": "Forces comparative case + definitional precision."
+    },
+    {
+      "id": "history-colonialism-economic-impact",
+      "label": "Colonial legacies on economy",
+      "theme": "History — Colonialism",
+      "prompt": "To what extent do contemporary economic inequalities between former coloniser and colonised nations result from colonial-era policies, versus post-independence governance choices?",
+      "image_url": null,
+      "notes": "Classic IB History question structure (\"to what extent\")."
+    },
+    {
+      "id": "history-cold-war-legacies",
+      "label": "Cold War legacies today",
+      "theme": "History — 20th Century",
+      "prompt": "Are current geopolitical tensions (Ukraine, Taiwan, the wider Indo-Pacific) better explained as continuations of Cold War-era contests, or as fundamentally new conflicts shaped by economic interdependence?",
+      "image_url": null,
+      "notes": "Causation + continuity question — high-quality DP territory."
+    },
+    {
+      "id": "gp-state-force-against-leader",
+      "label": "State force against another's leader",
+      "theme": "Global Politics — Sovereignty",
+      "prompt": "Can a state ever legitimately use force to remove the leader of another state? If yes, under what conditions and through which institutional channels?",
+      "image_url": null,
+      "notes": "Tests sovereignty, R2P, just war theory, and named-case evidence."
+    },
+    {
+      "id": "gp-gig-economy-freedom",
+      "label": "Gig economy: freedom or precarity?",
+      "theme": "Global Politics — Economic Justice",
+      "prompt": "Is the rise of the gig economy a sign of worker freedom and flexibility, or a sign of structural precarity that benefits platforms at workers' expense?",
+      "image_url": null,
+      "notes": "Both sides have strong arguments; tests whether the student can hold both."
+    },
+    {
+      "id": "gp-ai-governance-by-whom",
+      "label": "Who governs AI?",
+      "theme": "Global Politics — Technology",
+      "prompt": "Who should govern frontier AI systems — the firms that build them, the nation-states they operate within, or new global institutions? What does each path get right or wrong?",
+      "image_url": null,
+      "notes": "Highly current; three-way comparison built in."
+    },
+    {
+      "id": "gp-human-rights-cultural-relativism",
+      "label": "Universal rights vs cultural relativism",
+      "theme": "Global Politics — Human Rights",
+      "prompt": "Is the Universal Declaration of Human Rights actually universal, or a Western imposition? Where should the line be drawn between respecting cultural variation and defending non-negotiable rights?",
+      "image_url": null,
+      "notes": "Forces engagement with foundational tension in the field."
+    },
+    {
+      "id": "gp-nuclear-weapons-abolition",
+      "label": "Nuclear weapons abolition",
+      "theme": "Global Politics — Peace & Conflict",
+      "prompt": "Is global nuclear disarmament a realistic goal, or does the logic of deterrence make complete abolition inherently unstable? Use specific state cases.",
+      "image_url": null,
+      "notes": "Tests Cold War-era theory + present-day cases (DPRK, Iran, Ukraine post-Budapest)."
+    },
+    {
+      "id": "gp-climate-justice-loss-damage",
+      "label": "Climate loss-and-damage finance",
+      "theme": "Global Politics — Climate Justice",
+      "prompt": "Should historically high-emitting countries pay reparations to climate-vulnerable countries through loss-and-damage funds — and if so, how should responsibility be calculated?",
+      "image_url": null,
+      "notes": "Operationalisation question — strongest students engage with the HOW, not just the IF."
+    }
+  ]
+}

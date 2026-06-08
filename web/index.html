@@ -175,6 +175,7 @@
       align-items: center; padding: 20px 16px 18px;
       background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
       position: relative; overflow: hidden;
+      flex: 0 0 auto;
     }
     .title-block { text-align: center; margin-bottom: 14px; }
     .title-block .name { font-size: 14px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
@@ -366,16 +367,33 @@
     <section class="col">
       <div class="card col-grow">
         <h2>Exam Setup</h2>
-        <div class="sub">Define the question. LLM designs the probe graph.</div>
+        <div class="sub">Pick a template or write a custom question — LLM designs the probe graph.</div>
 
         <label>Student First Name</label>
         <input id="student-name" type="text" placeholder="e.g. Karan (optional — skips voice name capture)" autocomplete="off" />
+
+        <label>Assessment Template</label>
+        <select id="template-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+          <option value="" selected>Custom (LLM-generated) — write any question</option>
+        </select>
+        <div class="sub" id="template-description" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+
+        <div id="question-library-wrap" style="display:none">
+          <label style="margin-top:14px">Question from Library</label>
+          <select id="question-library-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="">— pick a question —</option>
+            <option value="__custom__">✎  Write a custom question</option>
+          </select>
+          <div class="sub" id="question-notes" style="margin-top:4px;font-size:11px;min-height:14px;font-style:italic;color:var(--muted)"></div>
+          <img id="question-image" style="display:none;margin-top:8px;max-width:100%;border-radius:6px;border:1px solid var(--border-2)" />
+        </div>
 
         <label>Question / Topic <span class="req">*</span></label>
         <textarea id="question" placeholder="e.g. Should AI replace teachers in schools?"></textarea>
 
         <label>Duration (minutes)</label>
         <input id="duration" type="number" min="2" max="20" value="6" />
+        <div class="sub" id="duration-hint" style="margin-top:4px;font-size:11px"></div>
 
         <details id="adv-toggle">
           <summary>Advanced Settings</summary>
@@ -398,16 +416,43 @@
 
           <label style="margin-top:14px">TTS Voice (Cartesia)</label>
           <select id="tts-voice-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
-            <option value="e07c00bc-4134-4eae-9ea4-1a55fb45746b" selected>Examiner — warm, neutral (current default)</option>
-            <option value="71a7ad14-091c-4e8e-a314-022ece01c121">British Reading Lady — calm, articulate (Pipecat default)</option>
-            <option value="c45bc5ec-dc68-4feb-8829-6e6b2748095d">Narrator — clear, storytelling</option>
-            <option value="7cf0e2b1-8daf-4fe4-89ad-f6039398f359">Male Character — expressive</option>
-            <option value="a5136bf9-224c-4d76-b823-52bd5efcffcc">Jameson — American English, voice-agent</option>
-            <option value="a0e99841-438c-4a64-b679-ae501e7d6091">Barbershop Man — friendly American</option>
-            <option value="2ee87190-8f84-4925-97da-e52547f9462c">Child — younger tone</option>
-            <option value="79a125e8-cd45-4c13-8a67-188112f4dd22">British Lady — formal</option>
+            <option value="e07c00bc-4134-4eae-9ea4-1a55fb45746b" selected>Examiner — neutral default (recommended)</option>
+            <optgroup label="English">
+              <option value="a7a59115-2425-4192-844c-1e98ec7d6877">Amber — US English, warm support</option>
+              <option value="fb02b554-7d64-4f90-841e-e57fc88f410c">Ailsa — British, warm guide</option>
+              <option value="7ea5e9c2-b719-4dc3-b870-5ba5f14d31d8">Janvi — Indian English, steady</option>
+              <option value="f6141af3-5f94-418c-80ed-a45d450e7e2e">Priya — Indian English, trusted operator</option>
+              <option value="a4a16c5e-5902-4732-b9b6-2a48efd2e11b">Grace — Australian, helpful</option>
+              <option value="996a8b96-4804-46f0-8e05-3fd4ef1a87cd">Darla — Canadian, calm + supportive</option>
+              <option value="db408a93-859c-4a0a-b6a2-220c074cc90d">Hana — New Zealand, easygoing</option>
+              <option value="d79d2b77-9192-4e10-9407-5d43ca034803">Siobhan — Irish, warm welcomer</option>
+              <option value="692846ad-1a6b-49b8-bfc5-86421fd41a19">Thandi — South African, professional</option>
+            </optgroup>
+            <optgroup label="Indic languages">
+              <option value="a81fccdc-5595-4dfc-ae76-4de6a515b8a2">Meera — Hindi, bright + friendly</option>
+              <option value="cf061d8b-a752-4865-81a2-57570a6e0565">Ramya — Telugu, graceful host</option>
+              <option value="d4470f50-295e-4e11-82a2-158d45bf6abc">Anitha — Tamil, warm guide</option>
+            </optgroup>
+            <optgroup label="European">
+              <option value="538a8872-3799-4df5-b373-b78493b766c6">Blanca — Spanish (Spain), graceful</option>
+              <option value="3797b3c0-ab71-40dc-bfa0-a8c6ff9c1e8b">Carolina — Spanish (Mexico), friendly</option>
+              <option value="6c64b57a-bc65-48e4-bff4-12dbe85606cd">Eloise — French (France), clear + warm</option>
+              <option value="38aabb6a-f52b-4fb0-a3d1-988518f4dc06">Alina — German, engaging</option>
+              <option value="36d94908-c5b9-4014-b521-e69aee5bead0">Giulia — Italian, teacherly</option>
+              <option value="c9611be8-aae9-4a93-bb1c-98dd6b7d52a4">Isabella — Portuguese (Brazil), warm storyteller</option>
+              <option value="225ba8cf-9fc2-4371-a78c-fe38ba38898a">Anneliese — Dutch, methodical guide</option>
+            </optgroup>
+            <optgroup label="East Asian">
+              <option value="498e7f37-7fa3-4e2c-b8e2-8b6e9276f956">Aiko — Japanese, calming</option>
+              <option value="69c18e1d-fab0-4747-b9da-58617cd8b9e4">Soyeon — Korean, bright companion</option>
+              <option value="7a5d4663-88ae-47b7-808e-8f9b9ee4127b">Hua — Chinese (Mandarin), sunny support</option>
+            </optgroup>
+            <optgroup label="Middle Eastern">
+              <option value="9825cf5f-6aff-412a-80c5-bc58a8d55bc4">Maryam — Arabic, friendly</option>
+              <option value="ff857c8e-e7f9-4afd-af42-dce9f3c5ab02">Yarden — Hebrew, trusted advisor</option>
+            </optgroup>
           </select>
-          <div class="sub" style="margin-top:4px;font-size:11px">Paste any Cartesia voice ID from the dashboard to use a different voice.</div>
+          <div class="sub" style="margin-top:4px;font-size:11px">Curated set — one or two voices per region. Paste any Cartesia voice ID from the dashboard to override.</div>
 
           <label style="margin-top:14px">STT Language</label>
           <select id="stt-language-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
@@ -438,7 +483,7 @@
     </section>
 
     <!-- ════════ MIDDLE (orb + conversation) ════════ -->
-    <section class="col">
+    <section class="col" style="overflow-y:auto;">
       <div class="center-card">
         <div class="title-block">
           <div class="name">AssessVox Examiner</div>
@@ -469,7 +514,14 @@
         </button>
       </div>
 
-      <div class="card log-card col-grow">
+      <div class="card" id="stimulus-card" style="display:none;flex:0 0 auto;padding:10px;">
+        <div style="font-size:11px;color:var(--muted-2);letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">Visual stimulus</div>
+        <img id="exam-stimulus" alt="Visual stimulus for this oral exam"
+             style="display:block;width:100%;max-height:340px;object-fit:contain;border-radius:6px;background:var(--panel-2);cursor:zoom-in;"
+             onclick="window.open(this.src, '_blank')" />
+      </div>
+
+      <div class="card log-card" style="flex:0 0 auto;min-height:420px;">
         <div class="log-head">
           <h2>Conversation</h2>
           <span id="latency-badge" style="display:none;font-size:10px;color:var(--muted-2);letter-spacing:0.5px;background:var(--panel-2);border:1px solid var(--border);padding:2px 8px;margin-left:auto;margin-right:6px;"></span>
@@ -581,103 +633,180 @@
     $('grading-prompt').value = $('grading-prompt').dataset.default || '';
   };
 
-  // ─── Populate Cartesia voice dropdown from server ───────────────────────
-  // Server caches the full Cartesia voice library; we group by language +
-  // country so an exam in any region can pick a native voice. The current
-  // selection (a custom voice ID not in the public list) is preserved at
-  // the top so teachers keep their default unless they change it.
+  // Cartesia voice dropdown is a hardcoded curated list in the HTML above
+  // (~25 voices, 1–2 per region). The dynamic fetch from /api/cartesia-voices
+  // was too noisy — 767 voices made the dropdown unusable. To swap a voice,
+  // edit the <option> list. The /api/cartesia-voices endpoint is still
+  // available server-side if you want to inspect the full library.
+
+  // ─── Populate assessment template + question-library pickers ───────────
+  // Two cascading selectors:
+  //   1. Template picker — populated from /api/templates
+  //   2. Question library — populated from /api/templates/{id}/questions
+  //      when a template is chosen. Picking a library question auto-fills
+  //      the textarea. "Custom" lets the teacher write their own.
   (async () => {
-    const sel = $('tts-voice-select');
-    if (!sel) return;
-    const currentValue = sel.value;
-    const currentLabel = sel.options[sel.selectedIndex]?.text || '';
+    const sel = $('template-select');
+    const desc = $('template-description');
+    const dur = $('duration');
+    const durHint = $('duration-hint');
+    const q = $('question');
+    const libWrap = $('question-library-wrap');
+    const libSel = $('question-library-select');
+    const qNotes = $('question-notes');
+    const qImg = $('question-image');
+
+    let templates = [];
     try {
-      const r = await fetch('/api/cartesia-voices');
+      const r = await fetch('/api/templates');
       const j = await r.json();
-      const voices = (j.voices || []).filter(v => v.id && v.name);
-      if (!voices.length) return;
-
-      // Locale labels — friendlier than ISO codes
-      const LOC = {
-        'en|US':'English (US)','en|GB':'English (UK)','en|IN':'English (Indian)',
-        'en|AU':'English (Australian)','en|NZ':'English (NZ)','en|CA':'English (Canadian)',
-        'en|ZA':'English (S. African)','en|IE':'English (Irish)',
-        'hi|':'Hindi','hi|IN':'Hindi',
-        'te|':'Telugu','te|IN':'Telugu',
-        'ta|':'Tamil',
-        'es|ES':'Spanish (Spain)','es|MX':'Spanish (Mexico)','es|AR':'Spanish (Argentina)',
-        'fr|FR':'French (France)','fr|CA':'French (Canadian)',
-        'de|':'German','de|DE':'German',
-        'pt|BR':'Portuguese (Brazil)','pt|PT':'Portuguese (Portugal)',
-        'it|':'Italian','it|IT':'Italian',
-        'ja|':'Japanese','ja|JP':'Japanese',
-        'ko|':'Korean','ko|KR':'Korean',
-        'zh|':'Chinese','zh|CN':'Chinese',
-        'ar|':'Arabic','he|':'Hebrew','tr|':'Turkish','th|':'Thai',
-        'pl|':'Polish','nl|':'Dutch','sv|':'Swedish','ru|':'Russian',
-        'tl|':'Tagalog',
-      };
-      const labelFor = (lang, country) => {
-        const key = `${lang || ''}|${country || ''}`;
-        if (LOC[key]) return LOC[key];
-        const lonly = `${lang || ''}|`;
-        if (LOC[lonly]) return LOC[lonly] + (country ? ` (${country})` : '');
-        return (lang || 'Other').toUpperCase() + (country ? ` (${country})` : '');
-      };
-
-      // Group voices
-      const groups = {};
-      for (const v of voices) {
-        const g = labelFor(v.language, v.country);
-        (groups[g] ||= []).push(v);
-      }
-      // Group order: English locales first, then Hindi & Indic, then alphabetical
-      const ORDER = [
-        'English (US)','English (Indian)','English (UK)','English (Australian)',
-        'English (NZ)','English (Canadian)','English (S. African)','English (Irish)',
-        'Hindi','Telugu','Tamil',
-      ];
-      const orderedGroups = [
-        ...ORDER.filter(g => groups[g]),
-        ...Object.keys(groups).filter(g => !ORDER.includes(g)).sort(),
-      ];
-
-      // Build new options. Preserve current selection as the first option
-      // (only if it doesn't already appear in the fetched list).
-      const fetchedIds = new Set(voices.map(v => v.id));
-      const frag = document.createDocumentFragment();
-      if (currentValue && !fetchedIds.has(currentValue)) {
-        const o = document.createElement('option');
-        o.value = currentValue;
-        o.textContent = currentLabel || `Custom voice (${currentValue.slice(0,8)}…)`;
-        frag.appendChild(o);
-      }
-      for (const gName of orderedGroups) {
-        const og = document.createElement('optgroup');
-        og.label = `${gName} — ${groups[gName].length} voice${groups[gName].length === 1 ? '' : 's'}`;
-        for (const v of groups[gName].sort((a, b) => a.name.localeCompare(b.name))) {
-          const o = document.createElement('option');
-          o.value = v.id;
-          const genderTag = v.gender === 'masculine' ? ' ♂' : v.gender === 'feminine' ? ' ♀' : '';
-          o.textContent = `${v.name}${genderTag}`;
-          o.title = v.description || '';
-          og.appendChild(o);
-        }
-        frag.appendChild(og);
-      }
-      sel.replaceChildren(frag);
-      // Restore selection
-      if (currentValue) sel.value = currentValue;
-      console.log(`Loaded ${voices.length} Cartesia voices across ${orderedGroups.length} groups`);
+      templates = j.templates || [];
     } catch (e) {
-      console.warn('Cartesia voice fetch failed, keeping static fallback list', e);
+      console.warn('template fetch failed', e);
+      return;
     }
+    // Group by programme
+    const groups = {};
+    for (const t of templates) {
+      (groups[t.programme || 'Other'] ||= []).push(t);
+    }
+    const ORDER = ['MYP', 'DP', 'PYP', 'CP'];
+    const ordered = [
+      ...ORDER.filter(p => groups[p]),
+      ...Object.keys(groups).filter(p => !ORDER.includes(p)).sort(),
+    ];
+    for (const pgrm of ordered) {
+      const og = document.createElement('optgroup');
+      og.label = pgrm;
+      for (const t of groups[pgrm].sort((a, b) => a.display_name.localeCompare(b.display_name))) {
+        const o = document.createElement('option');
+        o.value = t.id;
+        const qcount = t.question_count || 0;
+        o.textContent = qcount > 0
+          ? `${t.display_name} (${qcount} question${qcount === 1 ? '' : 's'})`
+          : t.display_name;
+        o.dataset.description = t.description || '';
+        o.dataset.duration = String(t.duration_minutes || 6);
+        o.dataset.defaultQuestion = t.default_question || '';
+        o.dataset.questionCount = String(qcount);
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+    }
+
+    // Helpers for the question library
+    const clearLibrary = () => {
+      // Keep only the two static options
+      const keep = [];
+      for (const o of libSel.options) {
+        if (o.value === '' || o.value === '__custom__') keep.push(o);
+      }
+      libSel.replaceChildren(...keep);
+      qNotes.textContent = '';
+      qImg.style.display = 'none';
+      qImg.src = '';
+    };
+
+    const loadLibrary = async (templateId) => {
+      clearLibrary();
+      try {
+        const r = await fetch(`/api/templates/${encodeURIComponent(templateId)}/questions`);
+        const j = await r.json();
+        const questions = j.questions || [];
+        if (!questions.length) {
+          libWrap.style.display = 'none';
+          return;
+        }
+        // Group by theme / global_context if present
+        const qGroups = {};
+        for (const item of questions) {
+          const g = item.theme || item.global_context || 'Questions';
+          (qGroups[g] ||= []).push(item);
+        }
+        for (const gName of Object.keys(qGroups)) {
+          const og = document.createElement('optgroup');
+          og.label = gName;
+          for (const item of qGroups[gName]) {
+            const o = document.createElement('option');
+            o.value = item.id;
+            o.textContent = item.label || item.id;
+            o.dataset.prompt = item.prompt || '';
+            o.dataset.notes = item.notes || '';
+            o.dataset.imageUrl = item.image_url || '';
+            og.appendChild(o);
+          }
+          libSel.appendChild(og);
+        }
+        libWrap.style.display = '';
+        libSel.value = '';
+      } catch (e) {
+        console.warn('question library fetch failed', e);
+        libWrap.style.display = 'none';
+      }
+    };
+
+    // Template change handler
+    sel.addEventListener('change', () => {
+      const opt = sel.options[sel.selectedIndex];
+      if (!opt || !opt.value) {
+        // Custom (LLM-generated) path
+        desc.textContent = '';
+        durHint.textContent = '';
+        q.placeholder = 'e.g. Should AI replace teachers in schools?';
+        libWrap.style.display = 'none';
+        clearLibrary();
+        return;
+      }
+      desc.textContent = opt.dataset.description || '';
+      dur.value = opt.dataset.duration || '6';
+      durHint.textContent = `Template default: ${opt.dataset.duration} min (editable)`;
+      // Reset textarea to template default IF teacher hasn't edited it
+      const prev = q.dataset.lastTemplateDefault || '';
+      if (!q.value.trim() || q.value.trim() === prev.trim()) {
+        q.value = opt.dataset.defaultQuestion || '';
+      }
+      q.dataset.lastTemplateDefault = opt.dataset.defaultQuestion || '';
+      q.placeholder = opt.dataset.defaultQuestion || '';
+      // Load library for this template
+      const qcount = parseInt(opt.dataset.questionCount || '0', 10);
+      if (qcount > 0) {
+        loadLibrary(opt.value);
+      } else {
+        libWrap.style.display = 'none';
+        clearLibrary();
+      }
+    });
+
+    // Question library change handler
+    libSel.addEventListener('change', () => {
+      const opt = libSel.options[libSel.selectedIndex];
+      qNotes.textContent = '';
+      qImg.style.display = 'none';
+      qImg.src = '';
+      if (!opt || !opt.value || opt.value === '__custom__') {
+        // Either "(pick one)" or "Custom" — leave the textarea alone
+        return;
+      }
+      // Library question selected — overwrite textarea
+      q.value = opt.dataset.prompt || '';
+      qNotes.textContent = opt.dataset.notes || '';
+      if (opt.dataset.imageUrl) {
+        qImg.src = opt.dataset.imageUrl;
+        qImg.style.display = 'block';
+      }
+    });
+
+    console.log(`Loaded ${templates.length} assessment templates`);
   })();
 
   // ─── Generate flow ──────────────────────────────────────────────────────
   $('generate-btn').onclick = async () => {
     const question = $('question').value.trim();
-    if (!question) { alert('Enter a question first.'); return; }
+    const template_id = ($('template-select')?.value || '').trim();
+    // Library-picked question id (skip the "__custom__" sentinel)
+    let question_id = ($('question-library-select')?.value || '').trim();
+    if (question_id === '__custom__') question_id = '';
+    if (!question && !template_id) { alert('Pick a template or enter a question.'); return; }
     const duration = parseInt($('duration').value || '6', 10);
     const studentName = ($('student-name')?.value || '').trim() || null;
     const promptOverride = $('grading-prompt').value.trim();
@@ -697,7 +826,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice }),
+        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice }),
       });
       if (!r.ok) {
         const err = await r.json();
@@ -706,6 +835,15 @@
       const data = await r.json();
       sessionId = data.session_id;
       renderFlow(data.flow);
+      const stimCard = $('stimulus-card');
+      const stimImg = $('exam-stimulus');
+      if (data.image_url) {
+        stimImg.src = data.image_url;
+        stimCard.style.display = '';
+      } else {
+        stimCard.style.display = 'none';
+        stimImg.src = '';
+      }
       setStatus(`Session ${sessionId.slice(-6)} ready`, 'live');
       $('call-btn').disabled = false;
       $('call-btn').classList.add('ready');

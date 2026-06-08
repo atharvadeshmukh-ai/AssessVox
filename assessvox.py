@@ -54,6 +54,7 @@ from dynamic_exam import (
 )
 from flow_planner import generate_flow
 from flow_validator import FlowValidationError, validate_flow_spec
+from template_loader import get_template, list_templates
 
 load_dotenv(override=True)
 
@@ -177,10 +178,25 @@ async def _get_cached_cartesia_voices() -> list[dict[str, Any]]:
 
 
 class CreateSessionRequest(BaseModel):
-    question: str
+    # Question can be either:
+    #   • Free-text question (template_id is None / empty) — uses flow_planner
+    #     to LLM-generate the FlowSpec, as it has since day one.
+    #   • An override for a template's default_question (template_id provided)
+    #     — uses the template's pre-built probe pool + grading rubric,
+    #     substituting the supplied question text.
+    question: str = ""
     duration_minutes: int = 6
     custom_grading_prompt: str | None = None
     student_name: str | None = None
+    # Template id for pre-built assessments. None / empty = the original
+    # LLM-generated free-text flow. See template_loader for the registry.
+    template_id: str | None = None
+    # Optional id of a question chosen from the template's question library.
+    # When provided alongside `template_id`, the library question's prompt
+    # is used as the exam_question (ignoring any custom `question` text
+    # unless the teacher edited it). When None, falls back to `question`
+    # (custom text) or the template's flow_spec.exam_question default.
+    question_id: str | None = None
     llm_provider: str = "google"
     llm_model: str = "gemini-3.5-flash"
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
@@ -200,6 +216,7 @@ class CreateSessionRequest(BaseModel):
 class CreateSessionResponse(BaseModel):
     session_id: str
     flow: dict
+    image_url: str | None = None
 
 
 @app.get("/api/grading-prompt", response_model=dict)
@@ -235,44 +252,147 @@ async def get_cartesia_voices():
         }
 
 
+@app.get("/api/templates", response_model=dict)
+async def get_templates():
+    """List available assessment templates so the UI can build the picker.
+
+    Returns a list of templates plus the special "Custom (LLM-generated)"
+    entry which is the legacy free-text flow path.
+    """
+    tpls = [t.to_dict() for t in list_templates()]
+    return {"templates": tpls}
+
+
+@app.get("/api/templates/{template_id}/questions", response_model=dict)
+async def get_template_questions(template_id: str):
+    """Return the question library for a given template.
+
+    The UI populates a second dropdown from this — teachers pick a specific
+    question for that assessment shape, or "Write custom" to type their own.
+    """
+    tpl = get_template(template_id)
+    if tpl is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_template_id", "template_id": template_id},
+        )
+    return {
+        "template_id": template_id,
+        "questions": tpl.questions_to_dict(),
+    }
+
+
 @app.post("/api/sessions", response_model=CreateSessionResponse)
 async def create_session(req: CreateSessionRequest):
-    """Teacher submits a question → server generates + validates a FlowSpec."""
+    """Teacher submits a question → server generates + validates a FlowSpec.
+
+    Two paths:
+      • Template path (template_id provided): load pre-built FlowSpec from JSON
+        template, optionally override the exam_question with req.question.
+        Skips flow_planner entirely — deterministic, fast.
+      • LLM path (template_id empty / None): legacy free-text path — call
+        flow_planner.generate_flow which uses the LLM to invent the FlowSpec.
+    """
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-    logger.info(f"Creating session {session_id} | topic={req.question!r}")
 
-    # Generate flow (retry once on validation failure)
-    last_errors: list[str] = []
+    template_id = (req.template_id or "").strip() or None
     flow_spec = None
-    for attempt in (1, 2):
-        try:
-            spec = await generate_flow(req.question, req.duration_minutes)
-            validate_flow_spec(spec)
-            flow_spec = spec
-            break
-        except FlowValidationError as e:
-            last_errors = e.reasons
-            logger.warning(f"attempt {attempt} validation failed: {last_errors}")
-        except Exception as e:
-            last_errors = [str(e)]
-            logger.warning(f"attempt {attempt} generation failed: {last_errors}")
+    template_grading_rubric: str | None = None
+    duration_minutes = req.duration_minutes
 
-    if flow_spec is None:
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "flow_generation_failed", "reasons": last_errors},
+    if template_id:
+        # ─── Template path ─────────────────────────────────────────────────
+        tpl = get_template(template_id)
+        if tpl is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "unknown_template_id", "template_id": template_id},
+            )
+
+        # Resolve the question. Priority:
+        #   1. Custom text in req.question (teacher typed something)
+        #   2. Library question by req.question_id
+        #   3. Template's flow_spec.exam_question default
+        question_id = (req.question_id or "").strip() or None
+        question_text_override: str | None = (req.question or "").strip() or None
+        image_url: str | None = None
+        if question_id:
+            q = tpl.get_question(question_id)
+            if q is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "unknown_question_id",
+                            "template_id": template_id,
+                            "question_id": question_id},
+                )
+            image_url = q.get("image_url") or None
+            if not question_text_override:
+                question_text_override = q.get("prompt") or None
+
+        logger.info(
+            f"Creating session {session_id} | template={template_id} | "
+            f"question_id={question_id!r} | "
+            f"question={question_text_override or '(template default)'!r}"
         )
+        try:
+            flow_spec = tpl.build_flow_spec(question_override=question_text_override)
+            validate_flow_spec(flow_spec)
+        except FlowValidationError as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "template_invalid", "reasons": e.reasons,
+                        "template_id": template_id},
+            )
+        template_grading_rubric = tpl.grading_rubric
+        # Template-defined duration is the canonical one; req.duration_minutes
+        # is only honoured for the custom (LLM) path.
+        duration_minutes = flow_spec.duration_minutes
+    else:
+        # ─── Legacy LLM-generated path ─────────────────────────────────────
+        image_url = None
+        logger.info(f"Creating session {session_id} | topic={req.question!r}")
+        if not (req.question or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "question_required",
+                        "message": "Either provide template_id or a non-empty question."},
+            )
+        last_errors: list[str] = []
+        for attempt in (1, 2):
+            try:
+                spec = await generate_flow(req.question, req.duration_minutes)
+                validate_flow_spec(spec)
+                flow_spec = spec
+                break
+            except FlowValidationError as e:
+                last_errors = e.reasons
+                logger.warning(f"attempt {attempt} validation failed: {last_errors}")
+            except Exception as e:
+                last_errors = [str(e)]
+                logger.warning(f"attempt {attempt} generation failed: {last_errors}")
+        if flow_spec is None:
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "flow_generation_failed", "reasons": last_errors},
+            )
 
     # Persist spec to disk
     FLOWS_DIR.mkdir(parents=True, exist_ok=True)
     flow_path = FLOWS_DIR / f"flow_{session_id}.json"
     flow_path.write_text(flow_spec.model_dump_json(indent=2))
 
+    # Custom grading prompt resolution (priority order):
+    #   1. req.custom_grading_prompt — teacher-overridden in Advanced settings
+    #   2. template_grading_rubric  — from the chosen template
+    #   3. None — grading falls back to dynamic_exam.GRADING_PROMPT default
+    custom_prompt = req.custom_grading_prompt or template_grading_rubric
+
     _SESSIONS[session_id] = {
         "session_id": session_id,
-        "topic": req.question,
-        "duration_minutes": req.duration_minutes,
-        "custom_grading_prompt": req.custom_grading_prompt,
+        "topic": req.question or flow_spec.topic,
+        "duration_minutes": duration_minutes,
+        "custom_grading_prompt": custom_prompt,
+        "template_id": template_id,
         "student_name": (req.student_name or "").strip() or None,
         "flow_spec": flow_spec,
         "status": "ready",
@@ -283,13 +403,19 @@ async def create_session(req: CreateSessionRequest):
         "stt_language": (req.stt_language or "").strip() or None,
         "tts_voice": (req.tts_voice or "").strip()
                      or "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+        "image_url": image_url,
     }
 
     logger.info(
         f"Session {session_id} ready | {len(flow_spec.probe_pool)} probes | "
-        f"required={flow_spec.required_probes}"
+        f"required={flow_spec.required_probes} | "
+        f"source={'template:' + template_id if template_id else 'llm-generated'}"
     )
-    return CreateSessionResponse(session_id=session_id, flow=flow_spec.model_dump())
+    return CreateSessionResponse(
+        session_id=session_id,
+        flow=flow_spec.model_dump(),
+        image_url=image_url,
+    )
 
 
 @app.get("/api/sessions/{session_id}/flow")

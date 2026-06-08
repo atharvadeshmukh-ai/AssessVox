@@ -1,0 +1,156 @@
+{
+  "id": "dp-language-b-sl-oral",
+  "programme": "DP",
+  "subject": "Language B",
+  "level": "SL",
+  "assessment_type": "Individual Oral",
+  "display_name": "DP Language B SL — Individual Oral",
+  "description": "Internally assessed 15-min individual oral. Student responds to a visual stimulus (textual description for audio-only mode; image preview for setup), connects to one of 5 DP Lang B themes, engages in spontaneous discussion. Assessed against IB B1-B4 criteria.",
+  "flow_spec": {
+    "topic": "DP Language B SL individual oral — visual stimulus + theme discussion",
+    "exam_question": "Describe the image: a teenager sitting alone in a busy city café, looking at their phone, with people around them laughing and talking. Connect this image to one of the five DP Language B themes — Identities, Experiences, Human Ingenuity, Social Organization, or Sharing the Planet — and explain what it tells us about that theme.",
+    "duration_minutes": 15,
+    "examiner_tone": "professional IB examiner — warm but focused; expects target-language fluency and conceptual engagement",
+    "skills_assessed": [
+      "B1 — Language: range and accuracy of vocabulary and grammar",
+      "B2 — Message: relevance to the stimulus and ability to develop ideas",
+      "B3 — Interaction: engagement, fluency, and spontaneity",
+      "B4 — Cultural understanding: connection to target-language culture(s)"
+    ],
+    "redirect_when_off_topic": "Let's bring it back to the image and the theme you chose.",
+    "required_probes": ["describe_stimulus", "pick_theme", "personal_link", "cultural_link"],
+    "probe_pool": [
+      {
+        "id": "describe_stimulus",
+        "type": "question",
+        "prompt": "Ask the student to describe what they see in the image — people, setting, mood, what's happening. Push for specific detail rather than generic adjectives.",
+        "scaffold": "Just tell me what you notice first. Who's there? What's around them?"
+      },
+      {
+        "id": "pick_theme",
+        "type": "question",
+        "prompt": "Ask the student to identify which of the five DP Lang B themes (Identities, Experiences, Human Ingenuity, Social Organization, Sharing the Planet) the image best connects to, and why.",
+        "scaffold": "Just pick one of the five themes — and tell me one reason it fits."
+      },
+      {
+        "id": "personal_link",
+        "type": "example",
+        "prompt": "Ask the student to share a personal experience that connects to the chosen theme. This tests their ability to relate the abstract theme to lived reality.",
+        "scaffold": "A small story from your own life works — even a recent moment."
+      },
+      {
+        "id": "cultural_link",
+        "type": "comparison",
+        "prompt": "Ask how this theme shows up in the target-language culture(s) the student has studied. Compare with their own culture if useful. This is the B4 criterion.",
+        "scaffold": "Think of one custom, news story, song, or social norm from a target-language country that connects."
+      },
+      {
+        "id": "counter_view",
+        "type": "counter",
+        "prompt": "Ask the student to articulate a perspective that disagrees with their take on the theme. Pushes B2 (message development) and B3 (spontaneous engagement).",
+        "scaffold": "What would someone with the opposite view say about this image?"
+      },
+      {
+        "id": "future_view",
+        "type": "synthesis",
+        "prompt": "Ask the student how the theme might evolve in the next 20 years. Tests B2 (developed message) and conceptual depth.",
+        "scaffold": "What's one thing about this theme you think will change in your lifetime?"
+      },
+      {
+        "id": "wrap_up",
+        "type": "synthesis",
+        "prompt": "Ask the student to summarise their core view on the theme in 2-3 sentences. Final integration test.",
+        "scaffold": "In two or three sentences, what's your overall view on this theme?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student has used a vague abstraction (\"society\", \"culture\", \"people\"), push them to be more specific — which society, which culture, which people.",
+        "scaffold": "When you say [vague term], who exactly do you mean?"
+      }
+    ]
+  },
+  "grading_rubric": "You are an IB DP Language B SL examiner producing a HOLISTIC report on a 15-min individual oral assessment. Read the whole transcript before grading. Grade ONLY the student.\n\nThis is a target-language oral — vocabulary range, grammar accuracy, and pronunciation are central. The student should also demonstrate cultural awareness (B4) by drawing on the target-language community.\n\nExam stimulus (text description of the visual):\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript — authoritative source for evidence:\n{transcript}\n\nNode trace (which probes were reached):\n{node_trace}\n\nIB B1-B4 CRITERIA — each scored 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery):\n\n  clarity       — B2 Message: how directly does the student engage with the stimulus and the chosen theme?\n  reasoning     — B2 Message: how well does the student develop ideas, justify positions, handle counter-views?\n  examples      — B4 Cultural understanding: are personal and cultural examples specific and target-language-anchored?\n  engagement    — B3 Interaction: spontaneity, willingness to engage, initiative in dialogue.\n  fluency       — B1 Language + B3 Interaction: flow, pacing, recovery from hesitation. Estimate WPM (ideal 110-130 for L2).\n  pronunciation — B1 Language: intelligibility, stress, target-language phonetic accuracy.\n  confidence    — B3 Interaction: prosody, conviction, filler control. Different from fluency; can be slow + confident.\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the whole exam\n  - evidence: 1-3 short student quotes from the transcript (in the target language as spoken)\n\nThen produce:\n  - headline: one sentence (≤ 20 words)\n  - summary:  4-6 sentence narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps for B1-B4\n  - overall_score: 0-100 — weigh B1 Language and B4 Cultural understanding heaviest. If metadata.cancelled is true, set to 0 and set every dimension to 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "questions": [
+    {
+      "id": "identities-cafe-alone",
+      "label": "Identities — alone in a café",
+      "theme": "Identities",
+      "prompt": "Describe the image: a teenager sitting alone in a busy city café, looking at their phone, with people around them laughing and talking. What does this image tell us about identity in the digital age? Connect it to the theme of Identities and your own experience.",
+      "image_url": "https://plus.unsplash.com/premium_photo-1661520990465-a89e6307b903?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Iconic stimulus — lets students discuss loneliness, digital identity, belonging."
+    },
+    {
+      "id": "identities-passport-stack",
+      "label": "Identities — stack of passports",
+      "theme": "Identities",
+      "prompt": "Describe the image: a person holding a stack of passports from three different countries, standing at an airport. What does this image suggest about national identity in a globalised world? Connect it to the theme of Identities.",
+      "image_url": "https://images.unsplash.com/photo-1741795850743-798cdf152542?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Strong cross-cultural starter — multilingual / multinational students bring lived perspective."
+    },
+    {
+      "id": "experiences-airport-reunion",
+      "label": "Experiences — airport reunion",
+      "theme": "Experiences",
+      "prompt": "Describe the image: a family embracing tightly at airport arrivals, suitcases scattered, with the arrivals board glowing in the background. What kind of experience does this capture, and have you ever had one like it? Connect to the theme of Experiences.",
+      "image_url": "https://images.unsplash.com/photo-1721568818927-0e2158daf702?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Emotionally rich — taps into reunion / migration / separation experiences."
+    },
+    {
+      "id": "experiences-first-day",
+      "label": "Experiences — first day at school",
+      "theme": "Experiences",
+      "prompt": "Describe the image: a young child standing at the gate of a new school on their first day, holding a parent's hand, looking nervous but excited. What experience does this image represent? What was your own first-day-anywhere like?",
+      "image_url": "https://plus.unsplash.com/premium_photo-1683147646615-4c115ef17cd4?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Universal first-times — works across cultures and ages."
+    },
+    {
+      "id": "ingenuity-old-and-new",
+      "label": "Human Ingenuity — old and new side by side",
+      "theme": "Human Ingenuity",
+      "prompt": "Describe the image: a centuries-old stone building next to a modern glass skyscraper, photographed from below so both reach toward the sky. What does this say about human ingenuity across time? How do we balance preserving the old with building the new?",
+      "image_url": "https://images.unsplash.com/photo-1758464642853-bb1934571572?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Excellent for comparison; lets students talk about heritage vs progress."
+    },
+    {
+      "id": "ingenuity-3d-printed-house",
+      "label": "Human Ingenuity — 3D-printed house",
+      "theme": "Human Ingenuity",
+      "prompt": "Describe the image: a fully completed house being printed by a large 3D printing machine on a construction site. What does this technology mean for the future of how we live? Connect to the theme of Human Ingenuity.",
+      "image_url": "https://images.unsplash.com/photo-1769284005998-9500ae4f7e6c?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Tests vocabulary around technology + housing + sustainability."
+    },
+    {
+      "id": "social-protest-march",
+      "label": "Social Organization — protest march",
+      "theme": "Social Organization",
+      "prompt": "Describe the image: a peaceful protest march filling a city street, with people of many ages holding signs in multiple languages. What does this image say about how societies organise themselves to demand change? Connect to the theme of Social Organization.",
+      "image_url": "https://images.unsplash.com/photo-1591622180684-b96c52ef3908?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Rich for B4 cultural connection — protest culture differs widely across countries."
+    },
+    {
+      "id": "social-classroom-rural-urban",
+      "label": "Social Organization — classroom contrasts",
+      "theme": "Social Organization",
+      "prompt": "Describe two images side by side: a well-equipped urban classroom with laptops, and a rural classroom under a tree with a single chalkboard. What does this contrast tell us about how societies organise opportunity? Connect to the theme of Social Organization.",
+      "image_url": "https://images.unsplash.com/photo-1636202339022-7d67f7447e3a?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Strong equity / fairness angle. Good for students with experience of both contexts."
+    },
+    {
+      "id": "planet-polluted-beach",
+      "label": "Sharing the Planet — polluted beach",
+      "theme": "Sharing the Planet",
+      "prompt": "Describe the image: a beautiful tropical beach at sunset, but the shoreline is covered in plastic bottles, packaging, and broken sandals. What responsibility do individuals vs governments have to address what this image shows? Connect to the theme of Sharing the Planet.",
+      "image_url": "https://images.unsplash.com/photo-1588803103006-2822e4b2619d?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Concrete environmental prompt; lets students argue for both individual and systemic responsibility."
+    },
+    {
+      "id": "planet-shared-meal",
+      "label": "Sharing the Planet — shared meal across cultures",
+      "theme": "Sharing the Planet",
+      "prompt": "Describe the image: people of different ages and backgrounds sharing a meal at a long table outdoors, with food from many different cultures visible. What does this image suggest about how we can share the planet? Connect to the theme of Sharing the Planet.",
+      "image_url": "https://plus.unsplash.com/premium_photo-1738016970469-5479811fc345?fm=jpg&q=60&w=3000&auto=format&fit=crop&ixlib=rb-4.1.0",
+      "notes": "Hopeful framing — lets students articulate positive vision of multiculturalism."
+    }
+  ]
+}

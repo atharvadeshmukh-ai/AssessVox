@@ -1,0 +1,172 @@
+{
+  "id": "dp-tok-exhibition-defense",
+  "programme": "DP",
+  "subject": "Theory of Knowledge (TOK)",
+  "level": "N/A",
+  "assessment_type": "Exhibition Oral Defense",
+  "display_name": "DP TOK — Exhibition Oral Defense",
+  "description": "The TOK Exhibition (33% of TOK grade) requires students to present 3 objects connected to ONE of 35 prescribed IA prompts. This template runs the practice oral DEFENSE that many schools use to rehearse — bot probes each object's connection, the choice of Areas of Knowledge, and the real-world resonance of the prompt.",
+  "flow_spec": {
+    "topic": "TOK Exhibition — oral defense of object selection",
+    "exam_question": "You have selected one IA prompt and chosen 3 objects that connect to it. Be ready to defend (1) why each object connects to your prompt, (2) which Areas of Knowledge your objects span, and (3) what your exhibition argues about the prompt as a whole.",
+    "duration_minutes": 10,
+    "examiner_tone": "intellectually rigorous, Socratic; the tone of a TOK teacher who wants the student to think harder, not safer",
+    "skills_assessed": [
+      "Justification of object selection against a specific IA prompt",
+      "Linking objects to TOK Areas of Knowledge (Natural Sciences, Human Sciences, Mathematics, History, Arts, Religious Knowledge Systems, Indigenous Knowledge Systems)",
+      "Real-world resonance and contemporary examples",
+      "Handling counter-perspectives and alternative readings"
+    ],
+    "redirect_when_off_topic": "Let's bring it back to the prompt and the three objects you chose.",
+    "required_probes": ["justify_object_one", "justify_object_two", "justify_object_three"],
+    "probe_pool": [
+      {
+        "id": "justify_object_one",
+        "type": "question",
+        "prompt": "Ask the student to name their FIRST object and defend why it connects to the chosen IA prompt. Push for specificity — what about THIS object, not a similar one?",
+        "scaffold": "What's your first object, and what makes it the right one for this prompt?"
+      },
+      {
+        "id": "justify_object_two",
+        "type": "question",
+        "prompt": "Ask about the SECOND object. Push the student to articulate how it differs from object 1 — what does it add that object 1 doesn't?",
+        "scaffold": "And the second object — what does it bring that the first one couldn't?"
+      },
+      {
+        "id": "justify_object_three",
+        "type": "question",
+        "prompt": "Ask about the THIRD object. Probe whether it's genuinely distinct or just a variation of one of the others. Test whether the three together make an argument or just illustrate the prompt.",
+        "scaffold": "Third object — is it doing different work, or does it overlap with one of the others?"
+      },
+      {
+        "id": "aok_link",
+        "type": "comparison",
+        "prompt": "Ask which Areas of Knowledge (AoKs) the prompt and the objects span. Push for at least TWO AoKs and ask how the prompt looks different from each angle.",
+        "scaffold": "Which Areas of Knowledge does your prompt touch? How does it look from at least two of them?"
+      },
+      {
+        "id": "real_world_example",
+        "type": "example",
+        "prompt": "Ask the student to give a CONTEMPORARY example (news in the last year, current event) that illustrates the prompt. Tests whether their knowledge questions are alive, not academic.",
+        "scaffold": "What's a current event from this year that illustrates the prompt?"
+      },
+      {
+        "id": "counter_perspective",
+        "type": "counter",
+        "prompt": "Offer an alternative interpretation of the prompt and ask the student to engage. Push them to consider whether their objects only work for one reading of the prompt.",
+        "scaffold": "What if someone read the prompt differently — for example [counter reading]? Do your objects still work?"
+      },
+      {
+        "id": "what_exhibition_argues",
+        "type": "synthesis",
+        "prompt": "Ask the student: in ONE sentence, what does your exhibition argue about the prompt? Forces them to articulate a thesis, not just a connection.",
+        "scaffold": "In one sentence, what's the answer your exhibition gives to the prompt?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student has used a TOK term loosely (\"knowledge\", \"truth\", \"interpretation\", \"belief\", \"objectivity\"), push them to define it precisely in the context of their prompt.",
+        "scaffold": "When you say [vague term], what specifically do you mean for this prompt?"
+      }
+    ]
+  },
+  "grading_rubric": "You are an IB DP TOK assessor grading a practice oral defense of an Exhibition. The student has chosen one of 35 prescribed IA prompts and 3 objects. Grade ONLY the student's responses in the discussion transcript — depth of justification, AoK awareness, contemporary resonance, ability to handle counter-perspectives.\n\nIA prompt (with student's task):\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript:\n{transcript}\n\nNode trace:\n{node_trace}\n\nTOK CRITERIA mapped to 1-4 dimensions (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery):\n\n  clarity       — Object specificity: are objects identified with enough detail that the assessor can picture them? Does each object connect to the prompt clearly, not vaguely?\n  reasoning     — Justification depth: does the student explain HOW each object connects (mechanism), not just THAT it connects? Can they defend under push-back?\n  examples      — Real-world resonance: contemporary case + AoK breadth. Does the prompt feel alive or academic?\n  engagement    — Willingness to engage with counter-perspectives; intellectual courage when a reading is challenged.\n  fluency       — Discussion-register language: hesitation, recovery, structural signposting.\n  pronunciation — Clarity, especially of TOK / AoK vocabulary.\n  confidence    — Tonal range and conviction; awareness when uncertain (saying \"I'm not sure\" is fine when warranted).\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the discussion\n  - evidence: 1-3 short student quotes\n\nThen produce:\n  - headline: one sentence (≤ 20 words)\n  - summary:  4-6 sentence narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps (e.g. \"add a second AoK\", \"strengthen the link from object 2 to prompt\")\n  - overall_score: 0-100. Weight reasoning + examples heaviest. Cancelled = 0 + all dims 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "questions": [
+    {
+      "id": "prompt-types-of-knowledge",
+      "label": "IA #15 — Open to interpretation",
+      "theme": "Knowledge Frameworks",
+      "prompt": "Your prompt is: \"Are some types of knowledge less open to interpretation than others?\" Choose 3 objects spanning at least 2 Areas of Knowledge and defend why each connects.",
+      "image_url": null,
+      "notes": "Strong AoK contrast question — Natural Sciences vs Arts."
+    },
+    {
+      "id": "prompt-new-knowledge-changes-values",
+      "label": "IA #24 — New knowledge changes values",
+      "theme": "Knowledge and Ethics",
+      "prompt": "Your prompt is: \"Can new knowledge change established values or beliefs?\" Choose 3 objects that illustrate cases where this happened — or didn't. Be ready to defend each connection.",
+      "image_url": null,
+      "notes": "Lets students bring strong contemporary examples (e.g. germ theory, climate, AI)."
+    },
+    {
+      "id": "prompt-imagination-and-knowledge",
+      "label": "IA #28 — Imagination's role in knowledge",
+      "theme": "Producing Knowledge",
+      "prompt": "Your prompt is: \"What role does imagination play in producing knowledge about the world?\" Choose 3 objects that show imagination at work in knowledge-making — across science, arts, or everyday reasoning.",
+      "image_url": null,
+      "notes": "Bridges science and arts; great for breaking AoK silos."
+    },
+    {
+      "id": "prompt-who-owns-knowledge",
+      "label": "IA #32 — Who owns knowledge",
+      "theme": "Knowledge and Society",
+      "prompt": "Your prompt is: \"Who owns knowledge?\" Choose 3 objects that surface the question of ownership — IP, indigenous knowledge, scientific commons, etc. Be ready to defend each.",
+      "image_url": null,
+      "notes": "Politically charged — students can engage with patents, vaccine equity, AI training data."
+    },
+    {
+      "id": "prompt-bias-inevitable",
+      "label": "IA #11 — Is bias inevitable",
+      "theme": "Producing Knowledge",
+      "prompt": "Your prompt is: \"Is bias inevitable in the production of knowledge?\" Choose 3 objects showing how bias operates in knowledge-making — and possibly one showing how it can be countered.",
+      "image_url": null,
+      "notes": "Tests methodological awareness across AoKs."
+    },
+    {
+      "id": "prompt-expectations-shape-knowing",
+      "label": "IA #22 — Expectations affect what we know",
+      "theme": "Producing Knowledge",
+      "prompt": "Your prompt is: \"How do our expectations affect what we know?\" Choose 3 objects that illustrate confirmation bias, framing effects, paradigm shifts, or other cases where what we expected shaped what we found.",
+      "image_url": null,
+      "notes": "Strong psychology / philosophy of science territory."
+    },
+    {
+      "id": "prompt-evidence-vs-conviction",
+      "label": "IA #20 — Evidence vs conviction",
+      "theme": "Knowledge and Ethics",
+      "prompt": "Your prompt is: \"What counts as good evidence for a claim?\" Choose 3 objects exemplifying very different evidentiary standards — courtroom, lab, news, lived experience — and defend each.",
+      "image_url": null,
+      "notes": "AoK comparison built in; pushes epistemological precision."
+    },
+    {
+      "id": "prompt-tradition-and-knowledge",
+      "label": "IA #6 — Replacing old knowledge",
+      "theme": "Knowledge and Society",
+      "prompt": "Your prompt is: \"How does the way we organise or classify knowledge affect what we know?\" Choose 3 objects showing how a classification system shaped — or distorted — knowledge.",
+      "image_url": null,
+      "notes": "Good for students drawn to history of science / library science / data."
+    },
+    {
+      "id": "prompt-knowledge-with-no-application",
+      "label": "IA #33 — Pure vs applied knowledge",
+      "theme": "Knowledge and Society",
+      "prompt": "Your prompt is: \"Is there knowledge that a person or group has a responsibility to acquire — or NOT to acquire?\" Choose 3 objects that span both directions of this question.",
+      "image_url": null,
+      "notes": "Ethics-heavy; strong AoK contrast (e.g. nuclear physics, medical ethics, indigenous knowledge)."
+    },
+    {
+      "id": "prompt-acquired-vs-shared",
+      "label": "IA #4 — Personal vs shared knowledge",
+      "theme": "Knowledge Frameworks",
+      "prompt": "Your prompt is: \"Why do we seek knowledge?\" Choose 3 objects showing different motivations for seeking knowledge — curiosity, survival, status, ethics — and defend.",
+      "image_url": null,
+      "notes": "Open question — gives students broad creative latitude."
+    },
+    {
+      "id": "prompt-what-counts-as-good-explanation",
+      "label": "IA #14 — Good explanations",
+      "theme": "Producing Knowledge",
+      "prompt": "Your prompt is: \"What counts as a good justification for a claim?\" Choose 3 objects where the strength of justification differs — across scientific argument, legal proof, mathematical proof, or testimony.",
+      "image_url": null,
+      "notes": "Tests AoK methodology fluency."
+    },
+    {
+      "id": "prompt-experts-and-knowledge",
+      "label": "IA #26 — Trust in expertise",
+      "theme": "Knowledge and Society",
+      "prompt": "Your prompt is: \"Does it matter who produces knowledge?\" Choose 3 objects that illustrate how the identity / position / interests of the producer affect the knowledge produced — across science, history, journalism.",
+      "image_url": null,
+      "notes": "Politically alive; great for current-events resonance."
+    }
+  ]
+}

@@ -350,6 +350,9 @@
     ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
   </style>
+  <!-- LiveKit JS SDK — loaded for video-mode sessions. ~80 KB gzipped; the
+       audio-only path doesn't touch it. UMD bundle exposes window.LivekitClient. -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
   <header>
@@ -521,6 +524,14 @@
              onclick="window.open(this.src, '_blank')" />
       </div>
 
+      <div class="card" id="video-card" style="display:none;flex:0 0 auto;padding:10px;">
+        <div style="font-size:11px;color:var(--muted-2);letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">
+          Your camera <span id="video-status" style="float:right;color:var(--muted-2);text-transform:none;letter-spacing:0;">waiting</span>
+        </div>
+        <video id="local-video" autoplay muted playsinline
+               style="display:block;width:100%;max-height:340px;background:#000;border-radius:6px;transform:scaleX(-1);"></video>
+      </div>
+
       <div class="card log-card" style="flex:0 0 auto;min-height:420px;">
         <div class="log-head">
           <h2>Conversation</h2>
@@ -581,6 +592,7 @@
 
   // ─── State ──────────────────────────────────────────────────────────────
   let sessionId = null;
+  let sessionData = null;          // full /api/sessions response, used by connect()
   let pc = null;
   let audioEl = null;
   let micStream = null;
@@ -588,6 +600,16 @@
   let audioCtx = null;
   let analyser = null;
   let waveformRAF = null;
+  // LiveKit (video-mode) state
+  let lkRoom = null;
+  let lkLocalTracks = [];
+  // MediaRecorder state — captures student camera + mixed audio (mic + bot)
+  // into a WebM blob that is uploaded server-side at end-of-call.
+  let lkRecorder = null;
+  let lkRecorderChunks = [];
+  let lkRecorderMime = '';
+  let lkAudioMixCtx = null;
+  let lkAudioMixDest = null;
 
   // ─── Build waveform bars ────────────────────────────────────────────────
   const wf = document.getElementById('waveform');
@@ -834,6 +856,7 @@
       }
       const data = await r.json();
       sessionId = data.session_id;
+      sessionData = data;
       renderFlow(data.flow);
       const stimCard = $('stimulus-card');
       const stimImg = $('exam-stimulus');
@@ -844,7 +867,9 @@
         stimCard.style.display = 'none';
         stimImg.src = '';
       }
-      setStatus(`Session ${sessionId.slice(-6)} ready`, 'live');
+      // Show the local-camera tile preview slot for video sessions
+      $('video-card').style.display = data.requires_video ? '' : 'none';
+      setStatus(`Session ${sessionId.slice(-6)} ready${data.requires_video ? ' (video)' : ''}`, 'live');
       $('call-btn').disabled = false;
       $('call-btn').classList.add('ready');
       $('call-btn').title = 'Start the exam';
@@ -891,8 +916,136 @@
 
   // ─── Call button — connect / disconnect toggle ──────────────────────────
   $('call-btn').onclick = () => {
-    if (pc) disconnect(); else connect();
+    if (pc || lkRoom) {
+      disconnect();
+    } else if (sessionData && sessionData.requires_video) {
+      connectLiveKit();
+    } else {
+      connect();
+    }
   };
+
+  async function connectLiveKit() {
+    if (!sessionData || !sessionData.livekit_token) {
+      alert('Missing LiveKit credentials in session response.'); return;
+    }
+    if (!window.LivekitClient) {
+      alert('LiveKit JS SDK failed to load. Check your network connection.'); return;
+    }
+    if (!window.isSecureContext) {
+      alert('Camera + mic require a secure context. Open http://localhost:8000 instead.');
+      return;
+    }
+
+    $('call-btn').disabled = true;
+    setStatus('Connecting to video room…');
+    setOrbState('listening');
+    setThinking(true);
+    $('hint-text').textContent = 'Joining video room — the examiner may take 3-4 seconds to be ready…';
+    $('video-status').textContent = 'connecting…';
+    $('log').innerHTML = '<div class="empty">Establishing video connection… the examiner usually starts speaking within 3-4 seconds.</div>';
+
+    try {
+      const { Room, RoomEvent, Track, createLocalTracks } = window.LivekitClient;
+      const room = new Room({ adaptiveStream: true, dynacast: true });
+      lkRoom = room;
+
+      // Audio mixing context — student mic + bot audio go into one
+      // MediaStreamDestination that the MediaRecorder pulls from. Created
+      // up front so both publish + subscribe handlers can connect into it.
+      lkAudioMixCtx = new (window.AudioContext || window.webkitAudioContext)();
+      lkAudioMixDest = lkAudioMixCtx.createMediaStreamDestination();
+
+      // Receive bot audio + feed it into the mix
+      room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+        if (track.kind === Track.Kind.Audio) {
+          if (!audioEl) {
+            audioEl = document.createElement('audio');
+            audioEl.autoplay = true;
+            document.body.appendChild(audioEl);
+          }
+          track.attach(audioEl);
+          try {
+            const botStream = new MediaStream([track.mediaStreamTrack]);
+            const botSrc = lkAudioMixCtx.createMediaStreamSource(botStream);
+            botSrc.connect(lkAudioMixDest);
+            startWaveform(botStream);
+          } catch (e) { console.warn('[mix] bot audio mix failed', e); }
+        }
+      });
+      room.on(RoomEvent.Disconnected, () => handleDisconnect());
+
+      await room.connect(sessionData.livekit_url, sessionData.livekit_token);
+      console.log('[livekit] connected to', sessionData.livekit_room);
+
+      const tracks = await createLocalTracks({ audio: true, video: true });
+      lkLocalTracks = tracks;
+      let localVideoMediaTrack = null;
+      let localAudioMediaTrack = null;
+      for (const t of tracks) {
+        await room.localParticipant.publishTrack(t);
+        if (t.kind === Track.Kind.Video) {
+          t.attach($('local-video'));
+          localVideoMediaTrack = t.mediaStreamTrack;
+        } else if (t.kind === Track.Kind.Audio) {
+          localAudioMediaTrack = t.mediaStreamTrack;
+        }
+      }
+
+      // Add student mic into the audio mix
+      if (localAudioMediaTrack) {
+        try {
+          const micOnly = new MediaStream([localAudioMediaTrack]);
+          const micSrc = lkAudioMixCtx.createMediaStreamSource(micOnly);
+          micSrc.connect(lkAudioMixDest);
+        } catch (e) { console.warn('[mix] mic mix failed', e); }
+      }
+
+      // Start MediaRecorder on (student video) + (mixed audio)
+      try {
+        const recordStream = new MediaStream();
+        if (localVideoMediaTrack) recordStream.addTrack(localVideoMediaTrack);
+        for (const t of lkAudioMixDest.stream.getAudioTracks()) recordStream.addTrack(t);
+        const mimeCandidates = [
+          'video/webm;codecs=vp9,opus',
+          'video/webm;codecs=vp8,opus',
+          'video/webm',
+          'video/mp4',
+        ];
+        lkRecorderMime = mimeCandidates.find(m => window.MediaRecorder?.isTypeSupported?.(m)) || '';
+        lkRecorder = new MediaRecorder(recordStream, lkRecorderMime ? { mimeType: lkRecorderMime } : undefined);
+        lkRecorderChunks = [];
+        lkRecorder.ondataavailable = (e) => { if (e.data && e.data.size) lkRecorderChunks.push(e.data); };
+        lkRecorder.onerror = (e) => console.warn('[recorder] error', e);
+        // 1 second chunks — keeps memory bounded for long sessions
+        lkRecorder.start(1000);
+        console.log('[recorder] started, mime =', lkRecorderMime || '(default)');
+      } catch (e) {
+        console.warn('[recorder] failed to start, session will run without local recording', e);
+      }
+
+      $('video-status').textContent = 'live';
+      setStatus('Live (video)', 'live');
+      setLive(true);
+      setOrbState('talking');
+      setThinking(false);
+      $('hint-text').textContent = 'Demonstrate on camera';
+      $('call-btn').classList.remove('ready');
+      $('call-btn').classList.add('live');
+      $('call-btn-label').textContent = 'End Exam';
+      $('call-btn').disabled = false;
+      $('call-btn').title = 'End exam';
+      startLivePolling();
+    } catch (e) {
+      console.error('[livekit] connect failed', e);
+      setStatus('Video connection failed', 'err');
+      setOrbState('idle');
+      setThinking(false);
+      $('video-status').textContent = 'failed';
+      $('call-btn').disabled = false;
+      lkRoom = null;
+    }
+  }
 
   async function connect() {
     if (!sessionId) { alert('Generate a flow first.'); return; }
@@ -997,10 +1150,102 @@
     }
   }
 
-  function disconnect() {
+  async function disconnect() {
+    const wasVideo = !!lkRoom;
+    const capturedSessionId = sessionId;
+    console.log('[disconnect] called, wasVideo=', wasVideo, 'sessionId=', capturedSessionId);
+
+    // STEP 1 — stop the recorder FIRST and wait for its final chunk, BEFORE
+    // tearing down any tracks. If we kill the underlying tracks first the
+    // recorder's source stream goes inactive and onstop may never fire.
+    let recorderPromise = null;
+    if (lkRecorder && lkRecorder.state !== 'inactive') {
+      console.log('[recorder] requesting stop, state=', lkRecorder.state, 'chunks so far=', lkRecorderChunks.length);
+      recorderPromise = new Promise(resolve => {
+        let resolved = false;
+        const done = (reason) => {
+          if (resolved) return;
+          resolved = true;
+          console.log('[recorder] stop resolved via', reason);
+          resolve();
+        };
+        lkRecorder.onstop = () => done('onstop');
+        // Safety: don't hang forever if onstop never fires.
+        setTimeout(() => done('timeout-5s'), 5000);
+        try {
+          lkRecorder.requestData?.();   // force a final ondataavailable
+          lkRecorder.stop();
+        } catch (e) {
+          console.warn('[recorder] stop threw', e);
+          done('threw');
+        }
+      });
+      // Wait synchronously here so chunks are complete before we tear tracks.
+      await recorderPromise;
+      console.log('[recorder] final chunk count=', lkRecorderChunks.length,
+                  'total bytes=', lkRecorderChunks.reduce((s, c) => s + c.size, 0));
+    }
+
+    // STEP 2 — tear down WebRTC / LiveKit
     if (pc) { pc.close(); pc = null; }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (lkRoom) {
+      try { lkRoom.disconnect(); } catch {}
+      lkRoom = null;
+    }
+    for (const t of lkLocalTracks) { try { t.stop(); } catch {} }
+    lkLocalTracks = [];
+    $('video-status').textContent = 'ended';
+
+    // STEP 3 — surface the "grading" state in the UI (starts the report
+    // poller). Upload happens in the background.
     handleDisconnect();
+
+    if (!wasVideo || !capturedSessionId) return;
+
+    // STEP 4 — upload the blob, then trigger grading
+    try {
+      if (lkRecorderChunks.length > 0) {
+        const mime = lkRecorderMime || 'video/webm';
+        const blob = new Blob(lkRecorderChunks, { type: mime });
+        console.log(`[recorder] uploading ${(blob.size / 1_000_000).toFixed(1)} MB (${mime})`);
+        $('hint-text').textContent = 'Uploading recording…';
+        const fd = new FormData();
+        const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+        fd.append('recording', blob, `${capturedSessionId}.${ext}`);
+        const upResp = await fetch(
+          `/api/sessions/${encodeURIComponent(capturedSessionId)}/upload-recording`,
+          { method: 'POST', body: fd }
+        );
+        const upJson = await upResp.json().catch(() => ({}));
+        console.log('[upload-recording] status=', upResp.status, upJson);
+      } else {
+        console.warn('[recorder] no chunks captured — skipping upload + grading');
+        return;
+      }
+    } catch (e) {
+      console.warn('[upload-recording] failed', e);
+      return;
+    } finally {
+      lkRecorderChunks = [];
+      lkRecorder = null;
+      lkRecorderMime = '';
+      if (lkAudioMixCtx) { try { lkAudioMixCtx.close(); } catch {} lkAudioMixCtx = null; }
+      lkAudioMixDest = null;
+    }
+
+    // STEP 5 — kick off grading
+    try {
+      $('hint-text').textContent = 'Grading video…';
+      const r = await fetch(
+        `/api/sessions/${encodeURIComponent(capturedSessionId)}/grade-video`,
+        { method: 'POST' }
+      );
+      const j = await r.json();
+      console.log('[grade-video] status=', r.status, j);
+    } catch (e) {
+      console.warn('[grade-video] failed', e);
+    }
   }
 
   function handleDisconnect() {

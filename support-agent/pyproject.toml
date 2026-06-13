@@ -1,0 +1,12 @@
+[project]
+name = "interview-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "livekit-agents[google,silero]~=1.5",
+    "livekit-api>=0.7",
+    "livekit-plugins-noise-cancellation~=0.2",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-dotenv>=1.2.1",
+]

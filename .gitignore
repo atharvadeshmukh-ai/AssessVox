@@ -210,6 +210,15 @@ flows/
 logs/
 transcripts/
 
+# support-agent is now part of AssessVox (its inner .git was removed).
+# Skip its secrets + the unused LiveKit example scaffolding apps.
+support-agent/.env.local
+support-agent/.venv/
+support-agent/generic_corporate_app/
+support-agent/interview_app/
+support-agent/KMS/
+support-agent/uv.lock
+
 # macOS clutter
 .DS_Store
 

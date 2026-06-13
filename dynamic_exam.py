@@ -1919,6 +1919,117 @@ Return ONLY valid JSON, no markdown:
 """
 
 
+# ─── Video grading (separate path) ─────────────────────────────────────────────
+#
+# Used when the session was a video-type exam (LiveKit + Gemini Live).
+# Input is the MP4 recording of the session. The grader watches the video and
+# returns the same JSON shape as the audio grader, plus three video-only
+# dimensions: technique, visual_clarity, verbal_visual_alignment.
+#
+# This prompt does NOT consume a transcript — the model transcribes internally
+# from the video's audio track. Evidence is grounded with timestamps so the
+# report card can let teachers jump to the moment in the recording.
+
+# Gemini "3.5" only released the flash variant — gemini-3.5-pro is not a real
+# model. Default to gemini-3.5-flash (proven working in the audio grader); if
+# you have Pro access on a different model line, override via env var.
+VIDEO_GRADER_MODEL = os.getenv("GEMINI_VIDEO_GRADER_MODEL", "gemini-3.5-flash")
+
+VIDEO_DIMENSION_GUIDE = """\
+AUDIO DIMENSIONS (same as text grading — judge from spoken content):
+  clarity                 — How directly did the student state and maintain their position?
+  reasoning               — Quality of argumentation and counterargument handling.
+  examples                — Real-world grounding plus conceptual depth. Specific named cases?
+  engagement              — On-topic discipline and willingness to attempt every probe.
+  fluency                 — Flow, pacing, pause patterns. Estimate WPM (ideal 130–150).
+  pronunciation           — Intelligibility and word-choice precision.
+                            For demo-heavy sessions (Sciences, Maths working), weight LOW.
+  confidence              — Prosody, conviction, filler control (um/uh/like).
+
+VIDEO DIMENSIONS (judge from what you SEE in the video, not what the student said):
+  technique               — Procedural correctness of the demonstration. Was the method
+                            right? Were diagrams accurate? Were steps in the correct order?
+                            For non-demo questions, score 4 by default and note "n/a".
+  visual_clarity          — Was what the student showed actually legible to a viewer?
+                            Diagram readable? Artwork in frame? Workings not blurry?
+                            Camera angle appropriate?
+  verbal_visual_alignment — Does what the student SAID match what they DID? Flag any
+                            mismatch (e.g. student said "I read at eye level" but the
+                            video shows them looking down). This dimension is uniquely
+                            video — score LOW only when you see a real discrepancy.
+"""
+
+VIDEO_GRADING_PROMPT = """You are an IB oral exam evaluator grading a VIDEO recording
+of a single oral assessment. You have the full video — audio AND visual evidence.
+Watch the recording end-to-end before scoring. Do not grade turn-by-turn; produce
+one integrated judgment per dimension.
+
+Two voices: an AI EXAMINER and the STUDENT. Grade ONLY the student. Ground every
+claim in what you can SEE or HEAR in the video. Do not invent observations.
+
+Exam question / task:
+  "{exam_question}"
+
+Topic context:
+  "{topic}"
+
+Exam metadata (JSON):
+{metadata}
+
+Node trace (which probes were reached):
+{node_trace}
+
+DIMENSIONS — score each 1–4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery)
+{dimension_guide}
+
+For each dimension produce:
+  - score:    integer 1–4
+  - analysis: 2–4 sentences of integrated commentary. For VIDEO dimensions
+              (technique, visual_clarity, verbal_visual_alignment), reference
+              what you SAW. For AUDIO dimensions, reference what you HEARD.
+  - evidence: 1–3 timestamped observations from the recording. Each item is
+              an OBJECT, not a string:
+                {{"timestamp": "MM:SS", "observation": "what happened"}}
+              For audio dimensions, the observation can be a short student quote.
+              For video dimensions, describe what was visible.
+              Never quote the examiner. Never write "entire recording".
+
+Then produce:
+  - headline:     one sentence (≤ 20 words) overall impression
+  - summary:      4–6 sentence holistic narrative covering both verbal and visual
+                  performance
+  - strengths:    2–3 specific items
+  - growth_areas: 2–3 concrete next steps
+  - overall_score: a single number 0–100. Weight TECHNIQUE and REASONING heaviest
+                   for demo-type sessions (Sciences, Maths working, Design). Weight
+                   VISUAL_CLARITY and CRAFT (use technique dim) heaviest for
+                   performance-type sessions (Arts, Music, Theatre). De-weight
+                   pronunciation for demos. If metadata.cancelled is true, set
+                   overall_score to 0 and every dimension score to 1.
+
+Return ONLY valid JSON, no markdown:
+{{
+  "headline": str,
+  "summary": str,
+  "dimensions": {{
+    "clarity":                 {{"score": int, "analysis": str, "evidence": [{{"timestamp": str, "observation": str}}, ...]}},
+    "reasoning":               {{...}},
+    "examples":                {{...}},
+    "engagement":              {{...}},
+    "fluency":                 {{...}},
+    "pronunciation":           {{...}},
+    "confidence":              {{...}},
+    "technique":               {{...}},
+    "visual_clarity":          {{...}},
+    "verbal_visual_alignment": {{...}}
+  }},
+  "strengths": [str, ...],
+  "growth_areas": [str, ...],
+  "overall_score": float
+}}
+"""
+
+
 def _write_wav(path: Path, pcm: bytes, sample_rate: int, num_channels: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wf:
@@ -2038,6 +2149,91 @@ def _grade_exam_sync(
         return {"error": "invalid_json", "raw": text}
 
 
+def _grade_exam_video_sync(
+    video_path: Path,
+    metadata: dict,
+    node_trace_str: str,
+    exam_question: str,
+    topic: str,
+    custom_prompt: str | None,
+) -> dict:
+    """Grade a video recording via Gemini multimodal Files API.
+
+    Uploads the MP4, waits for the file to become ACTIVE (videos take a few
+    seconds to be processed server-side), then asks the model to grade.
+    Returns the same JSON shape as `_grade_exam_sync` plus three video-only
+    dimensions.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+    logger.info(f"Uploading {video_path.name} to Gemini Files API…")
+    video_file = client.files.upload(file=str(video_path))
+
+    # Wait for processing — videos go through a PROCESSING → ACTIVE transition.
+    waited = 0.0
+    while getattr(video_file, "state", None) and video_file.state.name == "PROCESSING":
+        if waited > 300:
+            raise TimeoutError(
+                f"Gemini file processing exceeded 5 min for {video_path.name}"
+            )
+        time.sleep(3.0)
+        waited += 3.0
+        video_file = client.files.get(name=video_file.name)
+    if getattr(video_file, "state", None) and video_file.state.name == "FAILED":
+        raise RuntimeError(f"Gemini failed to process {video_path.name}")
+    logger.info(f"Video ready ({video_file.name}); calling {VIDEO_GRADER_MODEL}…")
+
+    prompt_template = custom_prompt or VIDEO_GRADING_PROMPT
+    try:
+        prompt = prompt_template.format(
+            exam_question=exam_question,
+            topic=topic,
+            metadata=json.dumps(metadata, indent=2),
+            node_trace=node_trace_str,
+            dimension_guide=VIDEO_DIMENSION_GUIDE,
+        )
+    except KeyError as e:
+        logger.warning(
+            f"Custom video grading prompt missing placeholder {e}; falling back to default"
+        )
+        prompt = VIDEO_GRADING_PROMPT.format(
+            exam_question=exam_question,
+            topic=topic,
+            metadata=json.dumps(metadata, indent=2),
+            node_trace=node_trace_str,
+            dimension_guide=VIDEO_DIMENSION_GUIDE,
+        )
+
+    response = client.models.generate_content(
+        model=VIDEO_GRADER_MODEL,
+        contents=[prompt, video_file],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            max_output_tokens=12288,
+        ),
+    )
+    text = (response.text or "{}").strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+
+    first = text.find("{")
+    last = text.rfind("}")
+    candidate = text[first:last + 1] if (first != -1 and last != -1 and last > first) else text
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        logger.error(
+            f"Video grader returned non-JSON ({e}). First 1000 chars:\n{text[:1000]}"
+        )
+        return {"error": "invalid_json", "raw": text}
+
+
 async def grade_exam(
     wav_path: Path,
     metadata: dict,
@@ -2047,28 +2243,46 @@ async def grade_exam(
     duration_seconds: float,
     exam_question: str,
     topic: str,
+    video_path: Path | None = None,
+    custom_video_prompt: str | None = None,
 ) -> None:
-    logger.info(f"Grading exam → sending {wav_path.name} to {GRADER_MODEL}")
+    """Grade an exam. Dispatches to the video grader when `video_path` is
+    provided; otherwise uses the audio (transcript + WAV) grader.
 
+    The two paths are intentionally independent — they evolve separately.
+    """
     transcript_str = _format_transcript(transcript_turns)
     node_trace_str = (
         "\n".join(f"  {n['ts']}  → {n['node']}" for n in node_trace)
         if node_trace else "(no transitions recorded)"
     )
 
-    try:
-        report = await asyncio.to_thread(
-            _grade_exam_sync,
-            wav_path, metadata, transcript_str, node_trace_str,
-            exam_question, topic,
-        )
-    except Exception as e:
-        logger.exception(f"Grading failed: {e}")
-        report = {"error": str(e)}
+    if video_path is not None and Path(video_path).exists():
+        logger.info(f"Grading (video path) → sending {video_path.name} to {VIDEO_GRADER_MODEL}")
+        try:
+            report = await asyncio.to_thread(
+                _grade_exam_video_sync,
+                video_path, metadata, node_trace_str,
+                exam_question, topic, custom_video_prompt,
+            )
+        except Exception as e:
+            logger.exception(f"Video grading failed: {e}")
+            report = {"error": str(e)}
+        report["video_file"] = str(video_path)
+    else:
+        logger.info(f"Grading (audio path) → sending {wav_path.name} to {GRADER_MODEL}")
+        try:
+            report = await asyncio.to_thread(
+                _grade_exam_sync,
+                wav_path, metadata, transcript_str, node_trace_str,
+                exam_question, topic,
+            )
+        except Exception as e:
+            logger.exception(f"Grading failed: {e}")
+            report = {"error": str(e)}
+        report["audio_file"] = str(wav_path)
 
-    # No post-processing: the grader's scores and overall_score pass through unchanged.
     report["metadata"] = metadata
-    report["audio_file"] = str(wav_path)
     report["transcript"] = transcript_turns
     report["node_trace"] = node_trace
     report_path.parent.mkdir(parents=True, exist_ok=True)

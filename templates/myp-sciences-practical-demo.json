@@ -1,0 +1,116 @@
+{
+  "id": "myp-sciences-practical-demo",
+  "programme": "MYP",
+  "subject": "Sciences (Chemistry / Biology / Physics)",
+  "level": "Year 4-5",
+  "assessment_type": "Practical Demonstration Oral",
+  "display_name": "MYP Sciences — Practical Demonstration",
+  "description": "Student performs a short laboratory or working-out demonstration on camera while a Socratic examiner probes their technique, reasoning, and procedural understanding. Aligned to MYP Sciences Criterion B (Inquiring and designing) and C (Processing and evaluating). Requires video — the examiner literally watches the student work.",
+  "flow_spec": {
+    "topic": "MYP Sciences practical demonstration — student works on camera while examiner probes technique and reasoning",
+    "exam_question": "Demonstrate the setup of an acid-base titration to find the unknown concentration of a hydrochloric acid solution. Show me your glassware, walk me through each step, and be ready to defend your technique and answer questions about the chemistry as you go.",
+    "duration_minutes": 10,
+    "examiner_tone": "warm but rigorous; the tone of a science teacher who is genuinely curious to see the student work and will gently push back on shortcuts or vague answers",
+    "skills_assessed": [
+      "Criterion B — Inquiring and designing: stating method and justifying technique choices",
+      "Criterion C — Processing and evaluating: handling data, reading instruments correctly, reasoning about uncertainty",
+      "Practical technique: glassware handling, measurement precision, lab safety",
+      "Scientific communication: explaining process to a non-expert in real time"
+    ],
+    "redirect_when_off_topic": "Let's bring it back to your demonstration — I want to see the next step.",
+    "required_probes": ["describe_setup", "demonstrate_step", "explain_choice"],
+    "probe_pool": [
+      {
+        "id": "describe_setup",
+        "type": "question",
+        "prompt": "Ask the student to show their apparatus on camera and name each piece of equipment. Push for the specific role of each component, not just the name.",
+        "scaffold": "Show me your setup — name each piece of glassware and tell me what it's doing in this experiment."
+      },
+      {
+        "id": "demonstrate_step",
+        "type": "example",
+        "prompt": "Ask the student to perform a specific step of the procedure on camera (filling the burette, taking a reading, recording an endpoint, etc.). Observe their technique and probe any deviation from best practice.",
+        "scaffold": "Go ahead and [next step] — I'll watch and ask as you go."
+      },
+      {
+        "id": "explain_choice",
+        "type": "question",
+        "prompt": "Pick a method choice the student made (concentration, volume, indicator, glassware) and ask them to defend WHY they chose it. Push back on \"because the textbook said so\".",
+        "scaffold": "Why this [indicator / volume / glassware] specifically — what would change if you used something else?"
+      },
+      {
+        "id": "uncertainty_check",
+        "type": "synthesis",
+        "prompt": "Ask the student about a specific source of uncertainty or error in what they just did, and how it would propagate to the final answer. Tests Criterion C.",
+        "scaffold": "What's the biggest source of error in what you just did — and how would it affect your final number?"
+      },
+      {
+        "id": "what_if",
+        "type": "counter",
+        "prompt": "Pose a what-if (\"what if you overshot the endpoint\", \"what if the burette had air bubbles\"). Tests whether the student understands the procedure or is following a recipe.",
+        "scaffold": "Suppose [scenario] — what would you see, and what would you do?"
+      },
+      {
+        "id": "data_processing",
+        "type": "example",
+        "prompt": "Ask the student to do a quick numerical calculation from their data on paper, on camera. Watch for correct unit handling, significant figures, stoichiometry.",
+        "scaffold": "On paper, work out the unknown concentration. Talk me through each line."
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student has used a vague term (\"accurate\", \"good result\", \"about\", \"roughly\"), push for a precise numeric or operational definition.",
+        "scaffold": "When you say [vague term] — in numbers, what does that mean?"
+      }
+    ]
+  },
+  "grading_rubric": "You are an IB MYP Sciences teacher grading an audio-only mock practical demonstration. The student verbally walked through a procedure for ~10 minutes. Grade ONLY the student's contributions.\n\nThis is the AUDIO fallback rubric — used only when the session was downgraded from video to audio-only (e.g. camera unavailable). Prefer the video_grading_rubric for the canonical assessment.\n\nDemo question:\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript:\n{transcript}\n\nNode trace:\n{node_trace}\n\nDIMENSIONS — 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery):\n{dimension_guide}\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the demo\n  - evidence: 1-3 short student quotes\n\nThen produce:\n  - headline: one sentence (≤ 20 words)\n  - summary:  4-6 sentence narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps\n  - overall_score: 0-100. Weight reasoning + examples heaviest given audio-only context. Cancelled = 0 + all dims 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{ ... 7 dims ... }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "video_grading_rubric": "You are an IB MYP Sciences teacher grading a VIDEO recording of a 10-min practical demonstration. The student worked on camera (apparatus, technique, calculations on paper) while an AI examiner probed their reasoning. Watch the recording end-to-end before scoring.\n\nGrade ONLY the student's contributions — both their VERBAL responses AND their VISIBLE technique.\n\nDemo question / task:\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nExam metadata (JSON):\n{metadata}\n\nNode trace (probes reached):\n{node_trace}\n\nDIMENSIONS — score each 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery):\n{dimension_guide}\n\nMYP Sciences-specific weighting:\n  • TECHNIQUE and VERBAL_VISUAL_ALIGNMENT are the two most important dimensions for this assessment — a student who explains the procedure correctly but executes it sloppily should not score above 2 on overall.\n  • Specifically penalise: misreading meniscus, not swirling between drops, not priming the burette, sloppy significant figures, missing units, unsafe handling.\n  • Specifically reward: stating uncertainty proactively, self-correcting in real time, articulating WHY each step matters (not just what).\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences. For VIDEO dimensions, describe what you SAW. For AUDIO dimensions, reference what was said.\n  - evidence: 1-3 timestamped observations as objects:\n              {{\"timestamp\": \"MM:SS\", \"observation\": \"what happened or was said\"}}\n              Never quote the examiner.\n\nThen produce:\n  - headline:     one sentence (≤ 20 words) covering both verbal AND practical performance\n  - summary:      4-6 sentence narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps, tied to MYP Criterion B/C\n  - overall_score: 0-100. Weight TECHNIQUE + VERBAL_VISUAL_ALIGNMENT + REASONING heaviest. De-weight pronunciation. Cancelled = 0 + all dims 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":                 {{\"score\": int, \"analysis\": str, \"evidence\": [{{\"timestamp\": str, \"observation\": str}}, ...]}},\n    \"reasoning\":               {{...}},\n    \"examples\":                {{...}},\n    \"engagement\":              {{...}},\n    \"fluency\":                 {{...}},\n    \"pronunciation\":           {{...}},\n    \"confidence\":              {{...}},\n    \"technique\":               {{...}},\n    \"visual_clarity\":          {{...}},\n    \"verbal_visual_alignment\": {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n",
+  "questions": [
+    {
+      "id": "chem-titration",
+      "label": "Chemistry — Acid-base titration",
+      "theme": "Chemistry — Practical Technique",
+      "prompt": "Demonstrate the setup of an acid-base titration to find the unknown concentration of a hydrochloric acid solution. Show me your glassware, walk me through each step, defend your technique choices, and calculate the unknown concentration on paper at the end.",
+      "image_url": null,
+      "requires_video": true,
+      "notes": "Highest-fidelity test of video-mode pipeline. Tests glassware handling, meniscus reading, endpoint detection, stoichiometry calculation on paper."
+    },
+    {
+      "id": "physics-free-body-diagram",
+      "label": "Physics — Free-body diagram + reasoning",
+      "theme": "Physics — Mechanics",
+      "prompt": "On paper, draw the free-body diagram for a 5kg block on a 30° frictionless incline. Hold the paper up to the camera. Then talk me through each force, calculate the acceleration down the incline, and be ready to defend your assumptions.",
+      "image_url": null,
+      "requires_video": true,
+      "notes": "Pure paper-based demo. Tests diagram correctness (visual), reasoning, calculation, ability to articulate assumptions."
+    },
+    {
+      "id": "bio-microscope-drawing",
+      "label": "Biology — Microscope drawing defense",
+      "theme": "Biology — Cells & Tissues",
+      "prompt": "Hold up your biological drawing (plant cell, animal cell, or onion epidermis) to the camera. Identify each labelled structure, explain its function, and defend your drawing conventions — magnification scale, label lines, clean outlines.",
+      "image_url": null,
+      "requires_video": true,
+      "notes": "Tests drawing conventions + biological knowledge. Good fit for camera mode because the artefact (drawing) is the assessment."
+    },
+    {
+      "id": "chem-equation-balancing",
+      "label": "Chemistry — Balance & explain a redox equation",
+      "theme": "Chemistry — Reactions",
+      "prompt": "On paper, balance the half-equations and overall reaction for the oxidation of iron(II) by permanganate in acidic solution. Hold up your working. Explain why this is a redox reaction and identify what is oxidised and reduced.",
+      "image_url": null,
+      "requires_video": true,
+      "notes": "Tests visible working + redox reasoning + electron-transfer language."
+    },
+    {
+      "id": "math-trig-identity",
+      "label": "Maths-adjacent — Trigonometric identity proof",
+      "theme": "Maths — Trigonometry",
+      "prompt": "On paper, prove that tan(x) + cot(x) = sec(x)·csc(x). Work the proof step by step on camera, hold the paper up, and be ready to justify each line. Talk me through your reasoning.",
+      "image_url": null,
+      "requires_video": true,
+      "notes": "Cross-discipline — works for MYP Sciences students taking integrated Maths-Sciences. Tests visible working + verbal proof."
+    }
+  ]
+}

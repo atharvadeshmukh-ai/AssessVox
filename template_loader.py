@@ -58,6 +58,11 @@ class Template:
         self.display_name: str = raw.get("display_name", self.id)
         self.description: str = raw.get("description", "")
         self.grading_rubric: str | None = raw.get("grading_rubric") or None
+        # Optional video-specific rubric. Used only when a session is graded
+        # via the video path (i.e. the picked question's requires_video=True
+        # AND a recording file is present). When None, the global
+        # VIDEO_GRADING_PROMPT default applies.
+        self.video_grading_rubric: str | None = raw.get("video_grading_rubric") or None
         # Validate the FlowSpec immediately — fails fast at load time, not at
         # session-creation time.
         self.flow_spec: FlowSpec = FlowSpec(**raw["flow_spec"])
@@ -118,6 +123,7 @@ class Template:
                 "theme": q.get("theme"),
                 "global_context": q.get("global_context"),
                 "image_url": q.get("image_url"),
+                "requires_video": bool(q.get("requires_video")),
                 "notes": q.get("notes") or "",
             })
         return out

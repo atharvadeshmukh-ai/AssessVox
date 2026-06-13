@@ -1,0 +1,32 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend
+interview_app/node_modules/
+interview_app/dist/
+generic_corporate_app/node_modules/
+generic_corporate_app/dist/
+node_modules/
+
+# Claude Code internals
+.claude/settings.local.json
+.agents/
+skills-lock.json
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

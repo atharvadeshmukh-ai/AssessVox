@@ -105,8 +105,8 @@ from pipecat.transports.daily.transport import DailyParams
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.cartesia.stt import CartesiaSTTService
-# Deepgram is lazy-imported inside _build_stt to avoid hard dependency on the
-# `deepgram` SDK extra when the user picks a different STT provider.
+# Deepgram, AssemblyAI, and xAI are lazy-imported inside _build_stt to avoid
+# hard dependency on their SDK extras when the user picks a different provider.
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.groq.llm import GroqLLMService
@@ -2171,12 +2171,14 @@ def _build_stt(
     """Instantiate the configured STT service.
 
     Supported providers:
-      - "elevenlabs": SmartTurnElevenLabsSTT wrapping scribe_v2_realtime
+      - "elevenlabs":  SmartTurnElevenLabsSTT wrapping scribe_v2_realtime
         (includes our commit cooldown, echo flush, auto-reconnect glue).
-      - "cartesia":   CartesiaSTTService with ink-whisper (cheap, low-latency,
+      - "cartesia":    CartesiaSTTService with ink-whisper (cheap, low-latency,
         no Whisper-family hallucinations from noise; native keepalive).
-      - "deepgram":   DeepgramSTTService with nova-3 (best keyterm-boosting
+      - "deepgram":    DeepgramSTTService with nova-3 (best keyterm-boosting
         for domain vocabulary).
+      - "assemblyai":  AssemblyAISTTService with Universal-3 Pro (u3-rt-pro).
+      - "xai":         XAISTTService using xAI's Grok voice WebSocket.
 
     Language defaults to 'en'. Pass empty string / None to enable auto-detect
     (only honoured by services that support it).
@@ -2227,6 +2229,45 @@ def _build_stt(
         )
 
     # Default: ElevenLabs
+    if provider == "assemblyai":
+        if not os.getenv("ASSEMBLYAI_API_KEY"):
+            raise RuntimeError("ASSEMBLYAI_API_KEY not set in .env (required for AssemblyAI STT)")
+        try:
+            from pipecat.services.assemblyai.stt import AssemblyAISTTService
+        except ImportError as e:
+            raise RuntimeError(
+                "AssemblyAI STT not installed — run: uv add 'pipecat-ai[assemblyai]'"
+            ) from e
+        logger.info(
+            f"STT provider: assemblyai / universal-3-pro | language={lang_code or 'auto'}"
+        )
+        return AssemblyAISTTService(
+            api_key=os.getenv("ASSEMBLYAI_API_KEY"),
+            settings=AssemblyAISTTService.Settings(
+                model="u3-rt-pro",
+                language=lang_code or None,
+            ),
+        )
+
+    if provider == "xai":
+        if not os.getenv("XAI_API_KEY"):
+            raise RuntimeError("XAI_API_KEY not set in .env (required for xAI STT)")
+        try:
+            from pipecat.services.xai.stt import XAISTTService
+        except ImportError as e:
+            raise RuntimeError(
+                "xAI STT not installed — run: uv add 'pipecat-ai[xai]'"
+            ) from e
+        logger.info(
+            f"STT provider: xai / grok | language={lang_code or 'auto'}"
+        )
+        return XAISTTService(
+            api_key=os.getenv("XAI_API_KEY"),
+            settings=XAISTTService.Settings(
+                language=lang_code or None,
+            ),
+        )
+
     if provider != "elevenlabs":
         logger.warning(
             f"Unknown stt_provider {stt_provider!r}, falling back to ElevenLabs"

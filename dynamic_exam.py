@@ -97,6 +97,8 @@ from pipecat.turns.user_mute import (
 )
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -110,6 +112,38 @@ from pipecat.services.cartesia.stt import CartesiaSTTService
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.groq.llm import GroqLLMService
+
+
+class AssessVoxGoogleLLMService(GoogleLLMService):
+    """GoogleLLMService whose TTFB metric is deferred to the first non-thought token.
+
+    Gemini 2.5+ models emit thought chunks before the actual answer when
+    thinking is enabled. The base class stops the TTFB clock on the very first
+    chunk regardless of type, which makes latency look ~20x better than what
+    the student actually experiences. This subclass gates stop_ttfb_metrics()
+    on the first real content token — a no-op when thinking is disabled.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ttft_armed = False
+
+    async def _process_context(self, context):
+        self._ttft_armed = False
+        await super()._process_context(context)
+
+    async def stop_ttfb_metrics(self, *, end_time: float | None = None):
+        if self._ttft_armed:
+            await super().stop_ttfb_metrics(end_time=end_time)
+
+    async def push_frame(self, frame, direction=None):
+        from pipecat.frames.frames import LLMTextFrame
+        if not self._ttft_armed and isinstance(frame, LLMTextFrame) and frame.text:
+            self._ttft_armed = True
+        if direction is not None:
+            await super().push_frame(frame, direction)
+        else:
+            await super().push_frame(frame)
 
 from websockets.asyncio.client import connect as _websocket_connect
 
@@ -2380,9 +2414,9 @@ async def run_bot(
             settings=GroqLLMService.Settings(model=llm_model),
         )
     else:
-        llm = GoogleLLMService(
+        llm = AssessVoxGoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
-            settings=GoogleLLMService.Settings(model=llm_model),
+            settings=AssessVoxGoogleLLMService.Settings(model=llm_model),
         )
 
     context = LLMContext()
@@ -2496,6 +2530,21 @@ async def run_bot(
         context_aggregator.assistant(),
     ])
 
+    metrics_logger = MetricsLogObserver()
+    latency_observer = UserBotLatencyObserver(enable_metrics=True)
+
+    @latency_observer.event_handler("on_latency_measured")
+    async def on_latency_measured(observer, latency_seconds):
+        logger.info(f"[LATENCY] voice-to-voice: {latency_seconds * 1000:.0f} ms")
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(observer, breakdown):
+        parts = " | ".join(
+            f"{m.processor.split('.')[-1]}={m.duration_secs * 1000:.0f}ms"
+            for m in breakdown.ttfb_metrics
+        )
+        logger.info(f"[LATENCY] breakdown: {parts}")
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -2503,7 +2552,7 @@ async def run_bot(
             enable_usage_metrics=True,
             allow_interruptions=True,
         ),
-        observers=[RTVIObserver(rtvi)],
+        observers=[RTVIObserver(rtvi), metrics_logger, latency_observer],
     )
 
     flow_manager = FlowManager(

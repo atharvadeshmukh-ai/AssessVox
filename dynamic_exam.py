@@ -684,21 +684,28 @@ class MarkerStripFilter(FrameProcessor):
 
         if isinstance(frame, (LLMTextFrame, TTSTextFrame, TextFrame)):
             text = getattr(frame, "text", "") or ""
-            stripped = text.lstrip()
+            # Only inspect for a marker; do NOT lstrip the frame unconditionally.
+            # Streaming providers (Groq/Llama, OpenAI) emit leading-space tokens
+            # like " Hello", " world" as natural word boundaries — stripping them
+            # collapses the output into "Helloworld...".
+            leading_ws_len = len(text) - len(text.lstrip())
+            after_ws = text[leading_ws_len:]
+            marker_found = False
             for marker in self._MARKERS:
-                if stripped.startswith(marker):
-                    stripped = stripped[len(marker):].lstrip()
-                    break  # only one marker per turn
-            if stripped != text:
-                logger.debug(
-                    f"MarkerStripFilter: stripped marker from "
-                    f"{type(frame).__name__}; before={text!r} after={stripped!r}"
-                )
-                frame.text = stripped
+                if after_ws.startswith(marker):
+                    # Strip leading whitespace + marker + any whitespace right after it.
+                    new_text = after_ws[len(marker):].lstrip()
+                    logger.debug(
+                        f"MarkerStripFilter: stripped marker from "
+                        f"{type(frame).__name__}; before={text!r} after={new_text!r}"
+                    )
+                    frame.text = new_text
+                    marker_found = True
+                    break
             # Drop the frame entirely if all that's left is whitespace —
             # this is the "bare ○" / "bare ◐" suppress-only case where
             # the LLM emitted nothing but the marker.
-            if not (frame.text or "").strip():
+            if marker_found and not (frame.text or "").strip():
                 return
 
         await self.push_frame(frame, direction)

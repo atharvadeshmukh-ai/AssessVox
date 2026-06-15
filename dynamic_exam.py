@@ -70,6 +70,7 @@ from pipecat.frames.frames import (
     CancelFrame,
     TextFrame,
     TranscriptionFrame,
+    TTSSpeakFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -873,36 +874,74 @@ ADVANCE_PROBE_SCHEMA = {
 
 # ─── Off-topic guardrail ───────────────────────────────────────────────────────
 
-def _off_topic_instruction(count: int, name: str) -> str:
+def _off_topic_redirect_text(count: int, name: str) -> str:
+    """The canned line spoken by the off-topic handler (NOT by the LLM).
+
+    Kept out of the LLM prompt because Gemini Flash has been observed to
+    call the function and then return zero completion tokens, leaving the
+    student in silence. The handler speaks this via TTSSpeakFrame so the
+    redirect is guaranteed regardless of Gemini's whim.
+    """
     redirect = _FLOW_SPEC.redirect_when_off_topic if _FLOW_SPEC else (
-        "Let us bring it back to the main question."
-    )
-    guard = (
-        "CRITICAL: call off_topic_strike at most ONCE per student message. "
-        "After calling it, check the result — if next_action='wait_for_student', "
-        "stop immediately and wait for their next response."
+        "Let's bring it back to the main question."
     )
     if count == 0:
-        return (
-            f"OFF-TOPIC TRACKER [strikes: 0]: if the student's most recent message "
-            f"is off-topic, redirect once warmly: '{redirect}' Then call off_topic_strike. {guard}"
-        )
+        return redirect
     if count == 1:
-        return (
-            f"OFF-TOPIC TRACKER [strikes: 1]: if off-topic, say firmly: "
-            f"'{name}, I need you to stay on topic. Please answer the question I asked.' "
-            f"Then call off_topic_strike. {guard}"
-        )
+        return f"{name}, I need you to stay on topic. Please answer the question I asked."
     if count == 2:
         return (
-            f"OFF-TOPIC TRACKER [strikes: 2]: if off-topic, issue a FINAL WARNING: "
-            f"'{name}, this is your final warning. If you go off-topic again, "
-            f"I will have to cancel this exam.' Then call off_topic_strike. {guard}"
+            f"{name}, this is your final warning. If you go off-topic again, "
+            "I will have to cancel this exam."
         )
     return (
-        f"OFF-TOPIC TRACKER [strikes: {count}]: if off-topic, say: "
-        f"'{name}, the exam is now being cancelled due to repeated off-topic behaviour.' "
-        f"Then call off_topic_strike. {guard}"
+        f"{name}, the exam is now being cancelled due to repeated off-topic behaviour."
+    )
+
+
+def _off_topic_instruction(count: int, name: str) -> str:
+    """System-prompt fragment that tells the LLM WHEN to call the function.
+
+    Note: the redirect TEXT is NOT included — the handler speaks it directly.
+    This avoids the 0-completion-tokens deadlock where Gemini called the
+    function first, saw next_action='wait_for_student', and refused to speak
+    the redirect at all.
+    """
+    # If the student is asking ABOUT the exam (META), the LLM should explain
+    # briefly rather than strike. Inject the exam's own topic + skills so the
+    # explanation is precise to this assessment, not a generic stock line.
+    topic = (_FLOW_SPEC.topic if _FLOW_SPEC else "this assessment").strip()
+    skills = (_FLOW_SPEC.skills_assessed if _FLOW_SPEC else []) or []
+    skills_str = "; ".join(skills) if skills else "reasoning and language use"
+    meta_check = (
+        f"META CHECK first: if the student is asking ABOUT the question "
+        f"('why ask this?', 'what does this mean?', 'is this graded?', "
+        f"'can you repeat?'), do NOT strike. Briefly say this assesses "
+        f"{skills_str} for {topic}, reassure no single right answer, then "
+        f"re-pose the original question. Otherwise:\n"
+    )
+
+    if count == 0:
+        return meta_check + (
+            "OFF-TOPIC TRACKER [strikes: 0]: if the student's most recent message "
+            "is off-topic (unrelated tangent, complaining about the question, "
+            "ignoring it), call off_topic_strike. The redirect line will be "
+            "spoken automatically — you do NOT need to write it yourself. "
+            "After the function call, wait for the student's next response."
+        )
+    if count == 1:
+        return meta_check + (
+            "OFF-TOPIC TRACKER [strikes: 1]: if still off-topic, call off_topic_strike. "
+            "The firm redirect will be spoken automatically. Then wait."
+        )
+    if count == 2:
+        return meta_check + (
+            "OFF-TOPIC TRACKER [strikes: 2]: if still off-topic, call off_topic_strike. "
+            "The FINAL WARNING will be spoken automatically. Then wait."
+        )
+    return meta_check + (
+        f"OFF-TOPIC TRACKER [strikes: {count}]: if still off-topic, call off_topic_strike. "
+        "The cancellation line will be spoken automatically."
     )
 
 
@@ -912,6 +951,20 @@ async def handle_global_off_topic(
     count = flow_manager.state.get("off_topic_count", 0) + 1
     flow_manager.state.update({"off_topic_count": count})
     logger.info(f"Off-topic strike #{count}")
+
+    # Speak the canned redirect directly via TTS so the student always hears
+    # something even if Gemini Flash returns 0 completion tokens after the
+    # function call (a known failure mode — see session 20260615_030219).
+    name = flow_manager.state.get("name", "")
+    redirect_text = _off_topic_redirect_text(count - 1, name)
+    if redirect_text:
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(redirect_text))
+            logger.info(
+                f"Handler emitted off-topic redirect via TTS: {redirect_text!r}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to push TTSSpeakFrame for off-topic redirect: {e}")
 
     if count >= 4:
         return ({"status": "exam_cancelled"}, create_cancel_exam_node(flow_manager))
@@ -1969,6 +2022,26 @@ def _write_wav(path: Path, pcm: bytes, sample_rate: int, num_channels: int) -> N
         wf.writeframes(pcm)
 
 
+# Markers used by pipecat's filter_incomplete_user_turns mixin to flag
+# turn state in LLM output: ✓ complete, ○ incomplete-short, ◐ incomplete-long.
+# MarkerStripFilter cleans the TTS path, but the assistant aggregator
+# captures the raw LLM text into context.messages BEFORE the strip filter
+# runs. Strip here so reports and grader prompts never see them.
+_TURN_MARKERS = ("✓", "○", "◐")
+
+
+def _strip_turn_markers(text: str) -> str:
+    s = text or ""
+    # Remove markers anywhere in the string (they can appear mid-sentence
+    # when the LLM emits them as soft prefixes to chunked outputs).
+    for mk in _TURN_MARKERS:
+        s = s.replace(mk, "")
+    # Collapse the double-space holes left behind.
+    while "  " in s:
+        s = s.replace("  ", " ")
+    return s.strip()
+
+
 def _extract_transcript(context) -> list[dict]:
     msgs = None
     for attr in ("get_messages", "messages"):
@@ -1996,7 +2069,10 @@ def _extract_transcript(context) -> list[dict]:
         if not content or role not in ("user", "assistant"):
             continue
         speaker = "STUDENT" if role == "user" else "EXAMINER"
-        turns.append({"speaker": speaker, "text": str(content).strip()})
+        text = _strip_turn_markers(str(content))
+        if not text:
+            continue
+        turns.append({"speaker": speaker, "text": text})
     return turns
 
 
@@ -2212,14 +2288,17 @@ def _build_stt(
     """Instantiate the configured STT service.
 
     Supported providers:
-      - "elevenlabs":  SmartTurnElevenLabsSTT wrapping scribe_v2_realtime
+      - "elevenlabs":     SmartTurnElevenLabsSTT wrapping scribe_v2_realtime
         (includes our commit cooldown, echo flush, auto-reconnect glue).
-      - "cartesia":    CartesiaSTTService with ink-whisper (cheap, low-latency,
+      - "cartesia":       CartesiaSTTService with ink-whisper (cheap, low-latency,
         no Whisper-family hallucinations from noise; native keepalive).
-      - "deepgram":    DeepgramSTTService with nova-3 (best keyterm-boosting
+      - "cartesia-ink-2": CartesiaSTTService with ink-2 (May 2026 release; #1 on
+        Artificial Analysis streaming STT leaderboards; built-in turn detection,
+        eager mode, semantic endpointing. English-only.)
+      - "deepgram":       DeepgramSTTService with nova-3 (best keyterm-boosting
         for domain vocabulary).
-      - "assemblyai":  AssemblyAISTTService with Universal-3 Pro (u3-rt-pro).
-      - "xai":         XAISTTService using xAI's Grok voice WebSocket.
+      - "assemblyai":     AssemblyAISTTService with Universal-3 Pro (u3-rt-pro).
+      - "xai":            XAISTTService using xAI's Grok voice WebSocket.
 
     Language defaults to 'en'. Pass empty string / None to enable auto-detect
     (only honoured by services that support it).
@@ -2227,18 +2306,21 @@ def _build_stt(
     lang_code = (stt_language or "").strip() or None
     provider = (stt_provider or "elevenlabs").lower()
 
-    if provider == "cartesia":
+    if provider in ("cartesia", "cartesia-ink-whisper", "cartesia-ink-2"):
         if not os.getenv("CARTESIA_API_KEY"):
             raise RuntimeError("CARTESIA_API_KEY not set in .env (required for Cartesia STT)")
+        # ink-2 is English-only at release (May 2026); ink-whisper is multilingual.
+        cartesia_model = "ink-2" if provider == "cartesia-ink-2" else "ink-whisper"
+        cartesia_lang = "en" if cartesia_model == "ink-2" else (lang_code or "en")
         logger.info(
-            f"STT provider: cartesia / ink-whisper | "
-            f"language={lang_code or 'auto'}"
+            f"STT provider: cartesia / {cartesia_model} | "
+            f"language={cartesia_lang}"
         )
         return CartesiaSTTService(
             api_key=os.getenv("CARTESIA_API_KEY"),
             settings=CartesiaSTTService.Settings(
-                model="ink-whisper",
-                language=lang_code or "en",
+                model=cartesia_model,
+                language=cartesia_lang,
             ),
         )
 
@@ -2280,13 +2362,35 @@ def _build_stt(
                 "AssemblyAI STT not installed — run: uv add 'pipecat-ai[assemblyai]'"
             ) from e
         logger.info(
-            f"STT provider: assemblyai / universal-3-pro | language={lang_code or 'auto'}"
+            f"STT provider: assemblyai / universal-3-pro | language={lang_code or 'auto'} "
+            f"| native turn-detection ON"
         )
+        # u3-rt-pro has a proprietary end-of-turn detector that's strictly
+        # better than Smart Turn V3 for our use case. Use AssemblyAI's native
+        # turn-detection mode (vad_force_turn_endpoint=False) so the model
+        # decides when the student is done, instead of forcing finals every
+        # 100ms and stacking Smart Turn + LLM markers on top.
+        #
+        # Per the installed source (stt.py:188-195):
+        #   vad_force_turn_endpoint=False is "AssemblyAI turn detection
+        #   mode, u3-rt-pro only" — AssemblyAI's model controls turn endings,
+        #   emits UserStarted/StoppedSpeakingFrame from STT.
         return AssemblyAISTTService(
             api_key=os.getenv("ASSEMBLYAI_API_KEY"),
+            vad_force_turn_endpoint=False,
+            should_interrupt=True,
             settings=AssemblyAISTTService.Settings(
                 model="u3-rt-pro",
                 language=lang_code or None,
+                # IB-domain biasing — boosts rubric vocabulary.
+                keyterms_prompt=(
+                    list(keyterms or [])
+                    + ["IB", "MYP", "DP", "TOK", "rubric", "criterion"]
+                ),
+                # Higher confidence threshold = more conservative end-of-turn.
+                # API default ~0.5; 0.7 reduces "Hi." / single-filler being
+                # judged complete after a substantive question.
+                end_of_turn_confidence_threshold=0.7,
             ),
         )
 
@@ -2475,16 +2579,26 @@ async def run_bot(
     #     ),
     # )
 
+    # AssemblyAI Universal-3 Pro has its own end-of-turn model. When that's
+    # the STT, retire the LLM marker mixin — it duplicates work, leaks ✓/○/◐
+    # into the saved transcript, and disagrees with AssemblyAI on borderline
+    # cases (e.g. "Hi." after a question, which AssemblyAI knows to wait on).
+    # For other STT providers (Cartesia, Deepgram, ElevenLabs) keep the mixin
+    # since they have no native turn detector.
+    _use_marker_mixin = (stt_provider or "").lower() != "assemblyai"
+    logger.info(
+        f"Turn detection: {'LLM markers (filter_incomplete_user_turns=True)' if _use_marker_mixin else 'AssemblyAI native (markers OFF)'}"
+    )
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
-            filter_incomplete_user_turns=True,
+            filter_incomplete_user_turns=_use_marker_mixin,
             # Defaults are 5 s / 10 s — tuned for snappy dialogue. For an oral
             # exam where students think mid-sentence, the 5 s timer fired as a
             # "Take your time, I'm listening" re-prompt right when the student
             # was actually still thinking. Stretch them so a real thinking
-            # pause doesn't get nagged.
+            # pause doesn't get nagged. (Only consulted when the mixin is on.)
             user_turn_completion_config=UserTurnCompletionConfig(
                 incomplete_short_timeout=12.0,   # ↑ from 5 — mid-sentence pause
                 incomplete_long_timeout=25.0,    # ↑ from 10 — "let me think"
@@ -2546,9 +2660,11 @@ async def run_bot(
 
     @latency_observer.event_handler("on_latency_breakdown")
     async def on_latency_breakdown(observer, breakdown):
+        # pipecat 1.3.0 renamed LatencyBreakdown.ttfb_metrics → .ttfb
+        # (list[TTFBBreakdownMetrics]). See user_bot_latency_observer.py:107.
         parts = " | ".join(
             f"{m.processor.split('.')[-1]}={m.duration_secs * 1000:.0f}ms"
-            for m in breakdown.ttfb_metrics
+            for m in breakdown.ttfb
         )
         logger.info(f"[LATENCY] breakdown: {parts}")
 

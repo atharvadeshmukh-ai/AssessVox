@@ -409,10 +409,13 @@
           <label style="margin-top:14px">STT Provider</label>
           <select id="stt-provider-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
             <option value="cartesia" selected>Cartesia · Ink Whisper — cheapest, no noise hallucinations (recommended)</option>
+            <option value="cartesia-ink-2">Cartesia · Ink-2 — May 2026, #1 streaming STT leaderboard, built-in turn detection (English only)</option>
             <option value="deepgram">Deepgram · Nova-3 — best for proper nouns, domain keyterms boosted</option>
+            <option value="assemblyai">AssemblyAI · Universal-3 Pro — high accuracy, multilingual</option>
+            <option value="xai">xAI · Grok Voice — low latency WebSocket</option>
             <option value="elevenlabs">ElevenLabs · Scribe v2 Realtime — original (legacy, more bugs)</option>
           </select>
-          <div class="sub" style="margin-top:4px;font-size:11px">Each provider needs its own API key in .env (CARTESIA_API_KEY / DEEPGRAM_API_KEY / ELEVENLABS_API_KEY).</div>
+          <div class="sub" style="margin-top:4px;font-size:11px">Each provider needs its own API key in .env (CARTESIA_API_KEY / DEEPGRAM_API_KEY / ASSEMBLYAI_API_KEY / XAI_API_KEY / ELEVENLABS_API_KEY).</div>
 
           <label style="margin-top:14px">TTS Voice (Cartesia)</label>
           <select id="tts-voice-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">

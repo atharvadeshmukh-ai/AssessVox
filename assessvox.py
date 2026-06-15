@@ -200,10 +200,12 @@ class CreateSessionRequest(BaseModel):
     llm_provider: str = "google"
     llm_model: str = "gemini-3.5-flash"
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
-    # no Whisper hallucinations), "deepgram" (nova-3 — best keyterm-boost
-    # for domain vocabulary), "elevenlabs" (scribe_v2_realtime, legacy path
-    # with commit/echo-flush workarounds), "assemblyai" (Universal-3 Pro),
-    # or "xai" (Grok voice WebSocket).
+    # no Whisper hallucinations), "cartesia-ink-2" (May 2026 ink-2 — #1 on
+    # streaming STT leaderboards, built-in turn detection, English-only),
+    # "deepgram" (nova-3 — best keyterm-boost for domain vocabulary),
+    # "elevenlabs" (scribe_v2_realtime, legacy path with commit/echo-flush
+    # workarounds), "assemblyai" (Universal-3 Pro), or "xai" (Grok voice
+    # WebSocket).
     stt_provider: str = "cartesia"
     # ISO-639-1 STT language. "en" locks transcripts to English (the default).
     # Empty string / None re-enables auto-detect (where supported).

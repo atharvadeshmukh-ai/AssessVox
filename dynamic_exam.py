@@ -111,8 +111,10 @@ from pipecat.services.cartesia.stt import CartesiaSTTService
 # Deepgram, AssemblyAI, and xAI are lazy-imported inside _build_stt to avoid
 # hard dependency on their SDK extras when the user picks a different provider.
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
+from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.openai.llm import OpenAILLMService
 
 
 class AssessVoxGoogleLLMService(GoogleLLMService):
@@ -2523,6 +2525,22 @@ async def run_bot(
         llm = GroqLLMService(
             api_key=groq_key,
             settings=GroqLLMService.Settings(model=llm_model),
+        )
+    elif llm_provider == "openai":
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY not set in .env")
+        llm = OpenAILLMService(
+            api_key=openai_key,
+            settings=OpenAILLMService.Settings(model=llm_model),
+        )
+    elif llm_provider == "anthropic":
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not anthropic_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+        llm = AnthropicLLMService(
+            api_key=anthropic_key,
+            settings=AnthropicLLMService.Settings(model=llm_model),
         )
     else:
         llm = AssessVoxGoogleLLMService(

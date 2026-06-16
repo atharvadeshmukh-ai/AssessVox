@@ -197,6 +197,7 @@ class CreateSessionRequest(BaseModel):
     # unless the teacher edited it). When None, falls back to `question`
     # (custom text) or the template's flow_spec.exam_question default.
     question_id: str | None = None
+    # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude)
     llm_provider: str = "google"
     llm_model: str = "gemini-3.5-flash"
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;

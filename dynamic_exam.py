@@ -2542,6 +2542,15 @@ async def run_bot(
             api_key=anthropic_key,
             settings=AnthropicLLMService.Settings(model=llm_model),
         )
+    elif llm_provider == "cerebras":
+        from pipecat.services.cerebras.llm import CerebrasLLMService
+        cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
+        if not cerebras_key:
+            raise RuntimeError("CEREBRAS_API_KEY not set in .env")
+        llm = CerebrasLLMService(
+            api_key=cerebras_key,
+            settings=CerebrasLLMService.Settings(model=llm_model),
+        )
     else:
         llm = AssessVoxGoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),

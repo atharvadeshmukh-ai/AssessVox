@@ -2479,9 +2479,10 @@ async def run_bot(
     session_id: str,
     llm_provider: str = "google",
     llm_model: str = "gemini-3.5-flash",
-    stt_provider: str = "elevenlabs",
+    stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+    use_turn_markers: str = "auto",
 ):
     # Per-session log file — captures every loguru log line emitted during this
     # session so we can post-mortem any one run without scrolling stdout.
@@ -2547,9 +2548,19 @@ async def run_bot(
         cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
         if not cerebras_key:
             raise RuntimeError("CEREBRAS_API_KEY not set in .env")
+        # gpt-oss-120b ships with reasoning_effort="medium" by default. That
+        # adds ~300 reasoning tokens per response and several seconds of LLM
+        # time even on short replies — wasted on an oral examiner that just
+        # needs to acknowledge / probe / advance. "low" is the minimum
+        # supported value (Cerebras does not allow disabling reasoning
+        # entirely on gpt-oss-120b). The `extra` dict is spread into the
+        # OpenAI-compatible chat-completions call by CerebrasLLMService.
         llm = CerebrasLLMService(
             api_key=cerebras_key,
-            settings=CerebrasLLMService.Settings(model=llm_model),
+            settings=CerebrasLLMService.Settings(
+                model=llm_model,
+                extra={"reasoning_effort": "low"},
+            ),
         )
     else:
         llm = AssessVoxGoogleLLMService(
@@ -2606,21 +2617,61 @@ async def run_bot(
     #     ),
     # )
 
-    # AssemblyAI Universal-3 Pro has its own end-of-turn model. When that's
-    # the STT, retire the LLM marker mixin — it duplicates work, leaks ✓/○/◐
-    # into the saved transcript, and disagrees with AssemblyAI on borderline
-    # cases (e.g. "Hi." after a question, which AssemblyAI knows to wait on).
-    # For other STT providers (Cartesia, Deepgram, ElevenLabs) keep the mixin
-    # since they have no native turn detector.
-    _use_marker_mixin = (stt_provider or "").lower() != "assemblyai"
+    # LLM turn-marker mixin: asks the LLM to emit ✓/○/◐ before every spoken
+    # reply, costing one extra LLM round-trip per user turn (~900 ms TTFB on
+    # Anthropic). Worth it when STT has no native endpointing; pure waste when
+    # STT does its own end-of-turn detection.
+    #
+    # use_turn_markers:
+    #   "auto" (default) — ON for everything except STTs with native turn
+    #                      detection (AssemblyAI Universal-3 Pro, Cartesia Ink-2)
+    #   "on"             — force ON (debugging / fall-back path)
+    #   "off"            — force OFF (skip the marker LLM call — caller takes
+    #                      responsibility for endpointing)
+    _stt_lower = (stt_provider or "").lower()
+    _stt_has_native_endpointing = _stt_lower in ("assemblyai", "cartesia-ink-2")
+    _marker_mode = (use_turn_markers or "auto").lower()
+    if _marker_mode == "on":
+        _use_marker_mixin = True
+    elif _marker_mode == "off":
+        _use_marker_mixin = False
+    else:
+        _use_marker_mixin = not _stt_has_native_endpointing
     logger.info(
-        f"Turn detection: {'LLM markers (filter_incomplete_user_turns=True)' if _use_marker_mixin else 'AssemblyAI native (markers OFF)'}"
+        f"Turn detection: "
+        f"mode={_marker_mode} | "
+        f"{'LLM markers ON (filter_incomplete_user_turns=True)' if _use_marker_mixin else 'native endpointing (markers OFF)'} "
+        f"| stt={_stt_lower}"
     )
+    # Custom turn-analyzer config. Pipecat's default is SmartTurn V3 with
+    # stop_secs=3.0 — the analyzer waits 3 s of silence before force-committing
+    # a turn it scored INCOMPLETE. With the marker mixin OFF (mode=off /
+    # auto with native-endpoint STT), there's nothing to overrule SmartTurn,
+    # so any borderline INCOMPLETE turn pays the full 3 s slack.
+    #
+    # stop_secs=2.0 — tuned for the IB oral exam pace where students often
+    # take 0.5-1.5 s mid-thought pauses. At 1.0 s SmartTurn was committing
+    # turns mid-breath, fragmenting one student response into 3-4 separate
+    # LLM calls and producing felt-latency stutter. 3.0 s (pipecat default)
+    # was too loose — added a full 3 s wait whenever the analyzer scored
+    # INCOMPLETE. 2.0 s absorbs natural mid-sentence pauses while keeping
+    # the worst-case ceiling well below the old default. SmartTurn still
+    # short-circuits instantly when it scores COMPLETE (most turns).
+    _turn_analyzer = LocalSmartTurnAnalyzerV3(
+        params=SmartTurnParams(stop_secs=2.0)
+    )
+    _user_turn_strategies = UserTurnStrategies(
+        stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_turn_analyzer)],
+    )
+
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
             filter_incomplete_user_turns=_use_marker_mixin,
+            # Explicit SmartTurn config — see above. Override default
+            # stop_secs=3.0 → 1.0 to keep slack bounded when markers are OFF.
+            user_turn_strategies=_user_turn_strategies,
             # Defaults are 5 s / 10 s — tuned for snappy dialogue. For an oral
             # exam where students think mid-sentence, the 5 s timer fired as a
             # "Take your time, I'm listening" re-prompt right when the student
@@ -2864,9 +2915,10 @@ async def run_session(
     student_name: str | None = None,
     llm_provider: str = "google",
     llm_model: str = "gemini-3.5-flash",
-    stt_provider: str = "elevenlabs",
+    stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+    use_turn_markers: str = "auto",
 ) -> None:
     """Server-friendly entry: caller provides transport, session_id, and a
     pre-generated FlowSpec. CLI mode uses bot() instead."""
@@ -2885,6 +2937,7 @@ async def run_session(
         stt_provider=stt_provider,
         stt_language=stt_language,
         tts_voice=tts_voice,
+        use_turn_markers=use_turn_markers,
     )
 
 

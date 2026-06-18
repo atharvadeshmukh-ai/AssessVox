@@ -197,7 +197,7 @@ class CreateSessionRequest(BaseModel):
     # unless the teacher edited it). When None, falls back to `question`
     # (custom text) or the template's flow_spec.exam_question default.
     question_id: str | None = None
-    # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude), "cerebras" (Llama 4 Scout ~100ms TTFT)
+    # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude), "cerebras" (GPT-OSS 120B, free tier)
     llm_provider: str = "google"
     llm_model: str = "gemini-3.5-flash"
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
@@ -207,7 +207,7 @@ class CreateSessionRequest(BaseModel):
     # "elevenlabs" (scribe_v2_realtime, legacy path with commit/echo-flush
     # workarounds), "assemblyai" (Universal-3 Pro), or "xai" (Grok voice
     # WebSocket).
-    stt_provider: str = "cartesia"
+    stt_provider: str = "cartesia-ink-2"
     # ISO-639-1 STT language. "en" locks transcripts to English (the default).
     # Empty string / None re-enables auto-detect (where supported).
     stt_language: str | None = "en"
@@ -215,6 +215,13 @@ class CreateSessionRequest(BaseModel):
     # using; the UI dropdown exposes a curated set, but any valid Cartesia
     # voice ID works.
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b"
+    # LLM turn-marker mixin control (filter_incomplete_user_turns):
+    #   "auto" — ON for STTs without native endpointing, OFF for assemblyai
+    #            and cartesia-ink-2 (default)
+    #   "on"   — force ON for every provider (costs +1 LLM round-trip per turn)
+    #   "off"  — force OFF for every provider (skips the marker call; only safe
+    #            when STT or VAD reliably detect end-of-turn on their own)
+    use_turn_markers: str = "auto"
 
 
 class CreateSessionResponse(BaseModel):
@@ -403,10 +410,11 @@ async def create_session(req: CreateSessionRequest):
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "llm_provider": req.llm_provider,
         "llm_model": _coerce_llm_model(req.llm_provider, req.llm_model),
-        "stt_provider": (req.stt_provider or "cartesia").strip().lower(),
+        "stt_provider": (req.stt_provider or "cartesia-ink-2").strip().lower(),
         "stt_language": (req.stt_language or "").strip() or None,
         "tts_voice": (req.tts_voice or "").strip()
                      or "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+        "use_turn_markers": (req.use_turn_markers or "auto").strip().lower(),
         "image_url": image_url,
     }
 
@@ -519,9 +527,10 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             student_name=s.get("student_name"),
             llm_provider=s.get("llm_provider", "google"),
             llm_model=s.get("llm_model", "gemini-3.5-flash"),
-            stt_provider=s.get("stt_provider", "cartesia"),
+            stt_provider=s.get("stt_provider", "cartesia-ink-2"),
             stt_language=s.get("stt_language", "en"),
             tts_voice=s.get("tts_voice", "e07c00bc-4134-4eae-9ea4-1a55fb45746b"),
+            use_turn_markers=s.get("use_turn_markers", "auto"),
         )
     except Exception:
         logger.exception(f"bot run failed for session {session_id}")

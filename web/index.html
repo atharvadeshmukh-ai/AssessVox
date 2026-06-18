@@ -405,20 +405,28 @@
             <option value="groq|llama-3.3-70b-versatile">Groq · Llama 3.3 70B — ultra-low latency (&lt;100ms TTFT)</option>
             <option value="openai|gpt-4o-mini">OpenAI · GPT-4o mini — fast &amp; cost-efficient</option>
             <option value="anthropic|claude-haiku-4-5">Anthropic · Claude 3.5 Haiku — low latency</option>
-            <option value="cerebras|llama-4-scout-17b-16e-instruct">Cerebras · Llama 4 Scout — ~100ms TTFT, fastest available</option>
+            <option value="cerebras|gpt-oss-120b">Cerebras · GPT-OSS 120B — ~1.6s TTFT, ~1900 tok/s, frontier-class open weights (1M tokens/day free tier)</option>
           </select>
           <div class="sub" style="margin-top:4px;font-size:11px">Groq → GROQ_API_KEY · OpenAI → OPENAI_API_KEY · Anthropic → ANTHROPIC_API_KEY · Cerebras → CEREBRAS_API_KEY</div>
 
           <label style="margin-top:14px">STT Provider</label>
           <select id="stt-provider-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
-            <option value="cartesia" selected>Cartesia · Ink Whisper — cheapest, no noise hallucinations (recommended)</option>
-            <option value="cartesia-ink-2">Cartesia · Ink-2 — May 2026, #1 streaming STT leaderboard, built-in turn detection (English only)</option>
+            <option value="cartesia-ink-2" selected>Cartesia · Ink-2 — May 2026, #1 streaming STT leaderboard, native turn detection (English only, recommended)</option>
+            <option value="cartesia">Cartesia · Ink Whisper — cheapest, no noise hallucinations, multilingual</option>
             <option value="deepgram">Deepgram · Nova-3 — best for proper nouns, domain keyterms boosted</option>
             <option value="assemblyai">AssemblyAI · Universal-3 Pro — high accuracy, multilingual</option>
             <option value="xai">xAI · Grok Voice — low latency WebSocket</option>
             <option value="elevenlabs">ElevenLabs · Scribe v2 Realtime — original (legacy, more bugs)</option>
           </select>
           <div class="sub" style="margin-top:4px;font-size:11px">Each provider needs its own API key in .env (CARTESIA_API_KEY / DEEPGRAM_API_KEY / ASSEMBLYAI_API_KEY / XAI_API_KEY / ELEVENLABS_API_KEY).</div>
+
+          <label style="margin-top:14px">Turn-end Detection</label>
+          <select id="turn-markers-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="auto" selected>Auto — STT-native when available, LLM ✓/○/◐ markers otherwise (recommended)</option>
+            <option value="off">Off — skip the marker LLM call (~900 ms faster, requires native-endpointing STT)</option>
+            <option value="on">On — always run the marker LLM call (safest, slowest)</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Auto turns markers OFF for Cartesia Ink-2 and AssemblyAI (which have native turn detection) and ON for everything else.</div>
 
           <label style="margin-top:14px">TTS Voice (Cartesia)</label>
           <select id="tts-voice-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
@@ -819,9 +827,10 @@
     const defaultPrompt = $('grading-prompt').dataset.default || '';
     const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
     const [llm_provider, llm_model] = ($('llm-select').value || 'google|gemini-3.5-flash').split('|');
-    const stt_provider = ($('stt-provider-select')?.value ?? 'cartesia');
+    const stt_provider = ($('stt-provider-select')?.value ?? 'cartesia-ink-2');
     const stt_language = ($('stt-language-select')?.value ?? 'en');
     const tts_voice = ($('tts-voice-select')?.value ?? 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
+    const use_turn_markers = ($('turn-markers-select')?.value ?? 'auto');
 
     $('generate-btn').disabled = true;
     setStatus('Generating flow…');
@@ -832,7 +841,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice }),
+        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice, use_turn_markers }),
       });
       if (!r.ok) {
         const err = await r.json();

@@ -355,6 +355,7 @@
   <header>
     <h1>ASSESSVOX</h1>
     <span class="tag">LLM-GENERATED ORAL EXAM</span>
+    <a href="/sessions" class="tag" style="text-decoration:none;cursor:pointer;letter-spacing:1px;">SESSIONS →</a>
     <span id="status" class="status">IDLE</span>
     <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">
       <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
@@ -480,6 +481,18 @@
             <option value="">Auto-detect (may mis-detect on disfluencies)</option>
           </select>
           <div class="sub" style="margin-top:4px;font-size:11px">Locks STT to a single language; prevents transcripts flipping to Russian/Hindi/etc.</div>
+
+          <label style="margin-top:14px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="auto-summarize-toggle" checked style="cursor:pointer;width:14px;height:14px;">
+            <span>Auto-summarize conversation history</span>
+          </label>
+          <div class="sub" style="margin-top:4px;font-size:11px">
+            When ON, Pipecat runs a background LLM summary every time the
+            transcript exceeds ~4K tokens, compressing older turns to a
+            short summary while keeping the last 4 verbatim. Cuts prompt
+            size + Gemini latency on long sessions. Turn OFF if you want
+            the model to see the full word-by-word history.
+          </div>
 
           <label style="margin-top:14px">Custom Grading Prompt</label>
           <textarea id="grading-prompt" class="adv" placeholder="loading default..."></textarea>
@@ -831,6 +844,7 @@
     const stt_language = ($('stt-language-select')?.value ?? 'en');
     const tts_voice = ($('tts-voice-select')?.value ?? 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
     const use_turn_markers = ($('turn-markers-select')?.value ?? 'auto');
+    const enable_auto_summarization = !!($('auto-summarize-toggle')?.checked ?? true);
 
     $('generate-btn').disabled = true;
     setStatus('Generating flow…');
@@ -841,7 +855,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice, use_turn_markers }),
+        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice, use_turn_markers, enable_auto_summarization }),
       });
       if (!r.ok) {
         const err = await r.json();

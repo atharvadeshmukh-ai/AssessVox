@@ -61,10 +61,14 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
+    FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     InterruptionFrame,
+    LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesUpdateFrame,
     LLMTextFrame,
+    MetricsFrame,
     StartFrame,
     EndFrame,
     CancelFrame,
@@ -82,7 +86,15 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMAssistantAggregatorParams,
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.utils.context.llm_context_summarization import (
+    LLMAutoContextSummarizationConfig,
+    LLMContextSummaryConfig,
+)
 # Kept-but-unused imports — used by the commented-out turn-management config
 # in run_bot. Leave imported so re-enabling lines is a no-op edit.
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
@@ -133,6 +145,30 @@ class AssessVoxGoogleLLMService(GoogleLLMService):
 
     async def _process_context(self, context):
         self._ttft_armed = False
+        # Gemini rejects contexts that start with a model turn.
+        # Happens when an async tool result re-triggers the LLM but the
+        # preceding user turn got dropped from the context window.
+        #
+        # context.messages can contain either dict-shaped LLMStandardMessage
+        # or LLMSpecificMessage dataclasses (whose .message field holds the
+        # provider-native payload — for Gemini that's a `Content` object).
+        # Probe both shapes safely.
+        if context.messages:
+            first = context.messages[0]
+            role = None
+            if isinstance(first, dict):
+                role = first.get("role")
+            else:
+                # LLMSpecificMessage(llm=..., message=<provider-native>).
+                # For Gemini the inner message exposes `.role`; for other
+                # providers it may differ — getattr-with-default is fine.
+                inner = getattr(first, "message", None)
+                role = getattr(inner, "role", None) or getattr(first, "role", None)
+            if role == "model":
+                context.messages.insert(0, {
+                    "role": "user",
+                    "parts": [{"text": "[conversation continued]"}]
+                })
         await super()._process_context(context)
 
     async def stop_ttfb_metrics(self, *, end_time: float | None = None):
@@ -147,6 +183,219 @@ class AssessVoxGoogleLLMService(GoogleLLMService):
             await super().push_frame(frame, direction)
         else:
             await super().push_frame(frame)
+
+
+# ─── LLM call dumper ─────────────────────────────────────────────────────────
+#
+# Per-session JSONL of every LLM round-trip: input messages, system prompt,
+# tools list, output text, tool_use blocks. Powers the /sessions dashboard's
+# "raw LLM I/O" inline expander.
+#
+# Hooked via _process_context (captures input) + push_frame (accumulates
+# streamed output text + tool calls; flushes record on LLMFullResponseEndFrame).
+# Designed as a mixin so it works for every provider (Anthropic, Google,
+# OpenAI, Groq, Cerebras) without per-provider subclassing.
+
+class LLMCallDumperMixin:
+    """Append a JSONL record of every LLM round-trip to llm_calls/calls_<session>.jsonl.
+
+    Captures: timestamp, provider class, model, input messages (via the
+    adapter's own logging serializer), output text concatenated across stream
+    chunks, and any tool_use blocks the LLM emitted.
+
+    Safe to mix into any pipecat LLM service that uses `_process_context` and
+    pushes `LLMFullResponseStartFrame`/`LLMFullResponseEndFrame`. All other
+    providers in this codebase follow that contract.
+    """
+
+    def __init__(
+        self,
+        *args,
+        _dump_path: Path | None = None,
+        _dump_kind: str = "conversation",   # or "summarization"
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._dump_path = _dump_path
+        self._dump_kind = _dump_kind
+        self._dump_lock = asyncio.Lock()
+        # Active record (one in flight at a time per LLM call).
+        self._cur_record: dict | None = None
+        self._cur_text_chunks: list[str] = []
+        self._cur_tool_calls: list[dict] = []
+        self._cur_usage: dict | None = None
+
+    async def _process_context(self, context):
+        if self._dump_path is not None:
+            try:
+                adapter = self.get_llm_adapter()
+                # `get_messages_for_logging` returns a safely-redacted list
+                # the SDK itself uses for debug logs. Plenty good for our
+                # inspector and avoids leaking large internal cache state.
+                messages = adapter.get_messages_for_logging(context)
+                # Some adapters return strings already; normalize to list.
+                if isinstance(messages, str):
+                    try:
+                        messages = json.loads(messages)
+                    except Exception:
+                        messages = [{"raw": messages}]
+                # Serialize tool definitions via the adapter so we get the
+                # actual function-declaration JSON the LLM sees, not the
+                # opaque ToolsSchema object reference.
+                tools = getattr(context, "tools", None)
+                tools_repr = []
+                try:
+                    if tools is not None:
+                        from pipecat.adapters.schemas.tools_schema import NOT_GIVEN
+                        if tools is not NOT_GIVEN:
+                            # adapter.to_provider_tools_format returns the
+                            # provider-specific list (e.g. Gemini's
+                            # [{function_declarations:[...]}]).
+                            formatted = adapter.to_provider_tools_format(tools)
+                            tools_repr = json.loads(json.dumps(formatted, default=str))
+                except Exception:
+                    try:
+                        # Fallback: grab standard_tools directly
+                        st = getattr(tools, "standard_tools", None)
+                        if st:
+                            tools_repr = json.loads(json.dumps([
+                                {"name": fn.name, "description": getattr(fn, "description", "")}
+                                for fn in st
+                            ], default=str))
+                    except Exception:
+                        tools_repr = [{"repr_failed": str(tools)[:200]}]
+                system = getattr(context, "system_message", None) or getattr(
+                    self, "_system_instruction", None
+                ) or getattr(self._settings, "system_instruction", None) if hasattr(self, "_settings") else None
+                self._cur_record = {
+                    "ts": datetime.now().isoformat(timespec="milliseconds"),
+                    "kind": self._dump_kind,
+                    "service": type(self).__name__,
+                    "model": getattr(self._settings, "model", None) if hasattr(self, "_settings") else None,
+                    "input": {
+                        "system": str(system) if system else None,
+                        "messages": messages,
+                        "tools": tools_repr,
+                    },
+                    "output": {"text": "", "tool_calls": []},
+                    "usage": None,
+                }
+                self._cur_text_chunks = []
+                self._cur_tool_calls = []
+                self._cur_usage = None
+            except Exception as e:
+                logger.warning(f"LLMCallDumper: input capture failed: {e}")
+                self._cur_record = None
+        return await super()._process_context(context)
+
+    async def run_function_calls(self, function_calls):
+        # Capture tool_use blocks here — for many providers (notably Gemini)
+        # the LLM emits tool_use as a streamed content_block, and pipecat
+        # routes it through this method without ever pushing a
+        # FunctionCallInProgressFrame downstream. The push_frame hook
+        # therefore misses it. This is the canonical capture point.
+        if self._cur_record is not None and function_calls:
+            try:
+                for fc in function_calls:
+                    self._cur_tool_calls.append({
+                        "name": getattr(fc, "function_name", None),
+                        "arguments": getattr(fc, "arguments", None),
+                        "tool_call_id": getattr(fc, "tool_call_id", None),
+                    })
+            except Exception:
+                pass
+        return await super().run_function_calls(function_calls)
+
+    async def push_frame(self, frame, direction=None):
+        # Accumulate streamed text + tool calls between Start and End frames.
+        if self._cur_record is not None:
+            if isinstance(frame, LLMTextFrame) and frame.text:
+                self._cur_text_chunks.append(frame.text)
+            elif isinstance(frame, FunctionCallInProgressFrame):
+                # Tool call emitted by the LLM via downstream frame. Some
+                # providers DO push this; capture if so (de-duped by
+                # tool_call_id at write time would be cleaner but in practice
+                # only one of the two paths fires per call).
+                try:
+                    seen_ids = {tc.get("tool_call_id") for tc in self._cur_tool_calls}
+                    new_id = getattr(frame, "tool_call_id", None)
+                    if new_id not in seen_ids:
+                        self._cur_tool_calls.append({
+                            "name": getattr(frame, "function_name", None),
+                            "arguments": getattr(frame, "arguments", None),
+                            "tool_call_id": new_id,
+                        })
+                except Exception:
+                    pass
+            elif isinstance(frame, MetricsFrame):
+                # MetricsFrame.data is a list of MetricsData; find LLMTokenUsage.
+                try:
+                    for entry in (getattr(frame, "data", None) or []):
+                        # LLMTokenUsage has: prompt_tokens, completion_tokens,
+                        # total_tokens, cache_read_input_tokens, etc. Just
+                        # serialize whatever it exposes.
+                        if entry.__class__.__name__ == "LLMUsageMetricsData":
+                            val = getattr(entry, "value", None) or entry
+                            self._cur_usage = {
+                                "prompt_tokens": getattr(val, "prompt_tokens", None),
+                                "completion_tokens": getattr(val, "completion_tokens", None),
+                                "total_tokens": getattr(val, "total_tokens", None),
+                                "cache_read_input_tokens": getattr(val, "cache_read_input_tokens", None),
+                                "cache_creation_input_tokens": getattr(val, "cache_creation_input_tokens", None),
+                                "reasoning_tokens": getattr(val, "reasoning_tokens", None),
+                            }
+                except Exception:
+                    pass
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                # Flush.
+                rec = self._cur_record
+                rec["output"]["text"] = "".join(self._cur_text_chunks)
+                rec["output"]["tool_calls"] = list(self._cur_tool_calls)
+                rec["usage"] = self._cur_usage
+                self._cur_record = None
+                self._cur_text_chunks = []
+                self._cur_tool_calls = []
+                self._cur_usage = None
+                # Best-effort async write — never block the audio pipeline.
+                asyncio.create_task(self._write_record(rec))
+        # Defer to the existing push_frame chain (incl. AssessVoxGoogleLLMService).
+        if direction is not None:
+            await super().push_frame(frame, direction)
+        else:
+            await super().push_frame(frame)
+
+    async def _write_record(self, record: dict):
+        if self._dump_path is None:
+            return
+        try:
+            async with self._dump_lock:
+                # Synchronous file write inside async lock — JSONL append is
+                # one syscall per call (cheap, and we already paid the LLM
+                # round-trip cost). Avoids needing aiofiles as a dep.
+                self._dump_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._dump_path.open("a") as f:
+                    f.write(json.dumps(record, default=str) + "\n")
+        except Exception as e:
+            logger.warning(f"LLMCallDumper: write failed: {e}")
+
+
+# Concrete dumper-enabled subclasses, one per provider. Mixin must precede
+# the provider class in MRO so its method overrides take effect.
+class _DumpingAssessVoxGoogleLLMService(LLMCallDumperMixin, AssessVoxGoogleLLMService):
+    pass
+
+
+class _DumpingAnthropicLLMService(LLMCallDumperMixin, AnthropicLLMService):
+    pass
+
+
+class _DumpingOpenAILLMService(LLMCallDumperMixin, OpenAILLMService):
+    pass
+
+
+class _DumpingGroqLLMService(LLMCallDumperMixin, GroqLLMService):
+    pass
+
 
 from websockets.asyncio.client import connect as _websocket_connect
 
@@ -730,6 +979,7 @@ RECORDINGS_DIR  = Path(__file__).parent / "recordings"
 REPORTS_DIR     = Path(__file__).parent / "reports"
 FLOWS_DIR       = Path(__file__).parent / "flows"
 LOGS_DIR        = Path(__file__).parent / "logs"
+LLM_CALLS_DIR   = Path(__file__).parent / "llm_calls"
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 
 # ─── Module-level flow state (populated at startup) ────────────────────────────
@@ -947,6 +1197,41 @@ def _off_topic_instruction(count: int, name: str) -> str:
     )
 
 
+def _state_block(flow_manager: FlowManager) -> str:
+    """Render the load-bearing facts as a compact block.
+
+    Pipecat's auto-summarizer compresses verbatim history, which can drop
+    rare-but-important facts ("student's position", "name confirmed") across
+    repeated summary cycles. Mitigation per the 2026 voice-agent playbook:
+    keep load-bearing facts in a structured State block prepended to the
+    system prompt every turn. State is NEVER summarised — only the
+    conversation transcript is.
+    """
+    if flow_manager is None:
+        return ""
+    s = flow_manager.state or {}
+    name = s.get("name") or "(not yet given)"
+    current = s.get("current_probe") or "opening"
+    covered = list(s.get("covered_probes") or [])
+    strikes = int(s.get("off_topic_count") or 0)
+    gold = (s.get("current_gold_moment") or "").strip()
+
+    lines = [
+        "[SESSION STATE — load-bearing facts. Refer to these even if they fell off transcript.]",
+        f"• Student name: {name}",
+        f"• Current probe: {current}",
+        f"• Probes covered: {', '.join(covered) if covered else 'none yet'}",
+        f"• Off-topic strikes: {strikes}",
+    ]
+    if gold:
+        # Truncate gold moment so the state block stays bounded.
+        if len(gold) > 240:
+            gold = gold[:237] + "…"
+        lines.append(f"• Last gold moment from student: \"{gold}\"")
+    lines.append("[/SESSION STATE]")
+    return "\n".join(lines) + "\n\n"
+
+
 async def handle_global_off_topic(
     args: FlowArgs, flow_manager: FlowManager
 ) -> tuple[dict, NodeConfig | None]:
@@ -1004,7 +1289,7 @@ def create_cancel_exam_node(flow_manager: FlowManager) -> NodeConfig:
     name = flow_manager.state.get("name", "student")
     return NodeConfig(
         name="cancelled",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
@@ -1037,7 +1322,7 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
 
     return NodeConfig(
         name="greeting",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
@@ -1062,7 +1347,14 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
                 "• NEVER call assess_name_response on your own assistant message. "
                 "Only call it in response to a real student utterance.\n"
                 "• Call assess_name_response at most ONCE per student message.\n"
-                "• Do NOT accept single words like 'Hi' or 'okay' as a name."
+                "• Do NOT accept single words like 'Hi' or 'okay' as a name.\n\n"
+                "SPEAK FIELD — mandatory for every call:\n"
+                "For intent='gave_name': write a warm one-sentence confirmation, "
+                "e.g. \"Great — I'll call you [name]. Did I get that right?\"\n"
+                "For intent='needs_clarification': write a brief helpful reply "
+                "that clarifies what you need.\n"
+                "For intent='evasion': write the redirect line specified above.\n"
+                "This text goes directly to TTS — no second LLM call is made."
             ),
         }],
         functions=[
@@ -1080,8 +1372,18 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
                         "type": "string",
                         "description": "The name the student gave. Empty string if none.",
                     },
+                    "speak": {
+                        "type": "string",
+                        "description": (
+                            "The exact sentence to speak aloud right now. "
+                            "For gave_name: a warm one-sentence confirmation reading "
+                            "back the name, e.g. 'Great — I'll call you Atharva. "
+                            "Did I get that right?'. For other intents: the "
+                            "appropriate redirect or clarification line."
+                        ),
+                    },
                 },
-                required=["intent", "name_if_given"],
+                required=["intent", "name_if_given", "speak"],
             ),
         ],
     )
@@ -1098,7 +1400,7 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
     name = flow_manager.state.get("name", "student")
     return NodeConfig(
         name="greeting_known_name",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
@@ -1114,7 +1416,13 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
                 "any clear affirmative.\n"
                 "  intent='not_ready' — student said no / wait / give me a moment / "
                 "asked a question / expressed nervousness.\n\n"
-                "Do NOT ask for the student's name; you already have it."
+                "Do NOT ask for the student's name; you already have it.\n\n"
+                f"SPEAK FIELD — mandatory:\n"
+                "For 'ready': ONE flowing statement — warm acknowledgement (3-5 words) "
+                "immediately followed by the exam question verbatim. No pause between "
+                "the two. Example: 'Wonderful! Here is our question for today: [question]'\n"
+                f"THE EXAM QUESTION IS (use verbatim): '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'\n"
+                "For 'not_ready': a gentle reassurance."
             ),
         }],
         functions=[
@@ -1131,8 +1439,16 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
                         "enum": ["ready", "not_ready"],
                         "description": "Whether the student is ready to start the exam.",
                     },
+                    "speak": {
+                        "type": "string",
+                        "description": (
+                            "The exact sentence to say right now. "
+                            "For ready: brief warm transition e.g. 'Wonderful — let's begin.' "
+                            "For not_ready: gentle reassurance."
+                        ),
+                    },
                 },
-                required=["intent"],
+                required=["intent", "speak"],
             ),
         ],
     )
@@ -1141,11 +1457,18 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
 def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
     """After the greeting captures a name, read it back and ask the student to
     confirm. If they reject, fall through to a spell-out node so a garbled STT
-    pass doesn't lock in the wrong name for the whole session."""
+    pass doesn't lock in the wrong name for the whole session.
+
+    On 'confirmed' the speak field must include BOTH the warm acknowledgement
+    AND the exam question introduction — the opening node will load with
+    respond_immediately=False, so this is the only LLM call that speaks.
+    """
     candidate = flow_manager.state.get("name_candidate", "")
+    exam_question = _FLOW_SPEC.exam_question if _FLOW_SPEC else ""
     return NodeConfig(
         name="confirm_name",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
+        respond_immediately=False,  # greeting handler speaks via TTS directly
         task_messages=[{
             "role": "system",
             "content": (
@@ -1158,7 +1481,16 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
                 "  intent='corrected'    — student rejected it or gave a different name\n"
                 "If 'corrected' and the student clearly stated a new name in the "
                 "same reply, pass it as corrected_name. Otherwise leave "
-                "corrected_name empty and we'll ask them to spell it."
+                "corrected_name empty and we'll ask them to spell it.\n\n"
+                "SPEAK FIELD — mandatory:\n"
+                "For 'confirmed': write ONE flowing statement that (a) warmly "
+                "acknowledges the confirmed name in 3-5 words, then (b) immediately "
+                "poses the exam question word for word. No pause between the two — "
+                "they should feel like one natural sentence. Example structure: "
+                "'Wonderful, [name]! Here is our question for today: [exam question]' "
+                f"THE EXAM QUESTION IS (use it verbatim): '{exam_question}'\n"
+                "For 'corrected' with a new name: confirm the new name warmly. "
+                "For 'corrected' without a name: ask them to spell it."
             ),
         }],
         functions=[
@@ -1179,8 +1511,19 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
                             "reply, put it here. Otherwise empty string."
                         ),
                     },
+                    "speak": {
+                        "type": "string",
+                        "description": (
+                            "The exact text to speak aloud right now. "
+                            "For confirmed: ONE flowing statement — warm acknowledgement "
+                            "(3-5 words) immediately followed by the exam question "
+                            "verbatim, e.g. 'Wonderful! Here is our question: [question]'. "
+                            "For corrected with new name: warm confirmation of the "
+                            "new name. For corrected without name: ask them to spell."
+                        ),
+                    },
                 },
-                required=["intent", "corrected_name"],
+                required=["intent", "corrected_name", "speak"],
             ),
         ],
     )
@@ -1192,7 +1535,8 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
     this is the recovery branch from the confirmation node."""
     return NodeConfig(
         name="spell_name",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
+        respond_immediately=False,  # confirmation handler speaks via TTS directly
         task_messages=[{
             "role": "system",
             "content": (
@@ -1219,8 +1563,16 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
                             "letters they spelled, title-cased."
                         ),
                     },
+                    "speak": {
+                        "type": "string",
+                        "description": (
+                            "ONE flowing statement: confirm the recorded name warmly "
+                            "(3-5 words) then immediately pose the exam question "
+                            f"verbatim: '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'"
+                        ),
+                    },
                 },
-                required=["name"],
+                required=["name", "speak"],
             ),
         ],
     )
@@ -1228,7 +1580,7 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
 
 # ─── Opening (uses generated exam_question) ────────────────────────────────────
 
-def create_opening_node(flow_manager: FlowManager) -> NodeConfig:
+def create_opening_node(flow_manager: FlowManager, respond_immediately: bool = True) -> NodeConfig:
     name = flow_manager.state.get("name", "student")
     count = flow_manager.state.get("off_topic_count", 0)
     if not _FLOW_SPEC:
@@ -1241,10 +1593,12 @@ def create_opening_node(flow_manager: FlowManager) -> NodeConfig:
 
     return NodeConfig(
         name="opening",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
+        respond_immediately=respond_immediately,
         task_messages=[{
             "role": "system",
             "content": (
+                f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name)}\n\n"
                 f"{time_notice}{support_notice}{no_repeat}"
                 f"Ask {name} the following exam question, word for word:\n"
@@ -1414,10 +1768,11 @@ def create_dynamic_probe_node(
 
     return NodeConfig(
         name=probe.id,
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
+                f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name)}\n\n"
                 f"{time_notice}{revisit_notice}{support_notice}{no_repeat}{instructions}"
             ),
@@ -1450,10 +1805,11 @@ def create_followup_probe_node(
 
     return NodeConfig(
         name="followup_probe",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
+                f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name)}\n\n"
                 f"{time_notice}{support_notice}{no_repeat}"
                 f"{name} just said something worth following up on:\n"
@@ -1504,7 +1860,7 @@ def create_closing_node(flow_manager: FlowManager) -> NodeConfig:
 
     return NodeConfig(
         name="closing",
-        role_messages=ROLE_MESSAGES,
+        role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{"role": "system", "content": content}],
         functions=[],
         post_actions=[{"type": "end_conversation"}],
@@ -1568,6 +1924,41 @@ def _pick_revisit_probe(flow_manager: FlowManager) -> str | None:
     # Sort by attempts ascending — least-explored probe gets revisited first.
     candidates.sort(key=lambda x: x[1])
     return candidates[0][0]
+
+
+async def _flush_transcript(flow_manager: FlowManager) -> None:
+    """[DISABLED — DO NOT CALL FROM handle_transition]
+
+    Used to wipe the user/assistant conversation history at a probe
+    boundary, but this breaks Gemini's function-call invariant: when the
+    flush runs during an active function-call/response pair (which is
+    exactly what's happening when `handle_transition` fires for
+    `advance_from_probe`), the next LLM call hits:
+
+        400 INVALID_ARGUMENT: Please ensure that function call turn comes
+        immediately after a user turn or after a function response turn.
+
+    Pipecat's docs explicitly do NOT guarantee safety of
+    LLMMessagesUpdateFrame during tool execution; see Pipecat issues
+    #3290 and #3557 for related upstream fragility.
+
+    If you want to re-introduce a flush, options are:
+      (a) Defer to the NEXT UserStartedSpeakingFrame after the function
+          chain completes (set a `_pending_flush` flag in flow_manager.state
+          and consume it from a FrameProcessor).
+      (b) Use LLMMessagesTransformFrame to keep the trailing user/fn-call/
+          fn-response triple intact and trim only older messages.
+
+    Until either of those lands, prompt-size growth is bounded by
+    auto-summarization + the state block alone.
+    """
+    try:
+        await flow_manager.task.queue_frame(
+            LLMMessagesUpdateFrame(messages=[], run_llm=False)
+        )
+        logger.info("Checkpoint flush: cleared user/assistant transcript")
+    except Exception as e:
+        logger.warning(f"Transcript flush failed (continuing anyway): {e}")
 
 
 async def handle_transition(
@@ -1662,6 +2053,17 @@ async def handle_transition(
         )
         flow_manager.state.update({"time_warning_given": True})
 
+    # NOTE: We previously called `_flush_transcript(flow_manager)` here as a
+    # "checkpoint flush" at every probe transition. Removed because it broke
+    # Gemini's function-call invariant — wiping the messages list mid-
+    # function-call returned 400 INVALID_ARGUMENT: "Please ensure that
+    # function call turn comes immediately after a user turn or after a
+    # function response turn." See sessions 20260619_094503 and 095433 for
+    # the crash trace, and Pipecat issues #3290 / #3557 for the upstream
+    # context. Bounding prompt growth now relies on auto-summarization
+    # (LLMAutoContextSummarizationConfig) + the state block, both of which
+    # respect Gemini's ordering rules.
+
     # ── Routing decisions (unchanged below) ───────────────────────────────
     gold = args.get("gold_moment", "").strip()
     gold_followed = flow_manager.state.get("gold_followed", 0)
@@ -1737,6 +2139,7 @@ async def handle_greeting_routing(
 ) -> tuple[dict, NodeConfig | None]:
     intent = args["intent"]
     name_given = args.get("name_if_given", "").strip()
+    speak_text = args.get("speak", "").strip()
 
     # Phantom-call guard: the LLM sometimes calls this function on its own
     # initial greeting before the student has uttered anything. Detect that and
@@ -1750,6 +2153,14 @@ async def handle_greeting_routing(
             f"no student message in context yet)"
         )
         return ({"next_action": "wait_for_student", "ignored": True}, None)
+
+    # Speak the LLM-generated line directly — skips the second LLM call.
+    if speak_text:
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(speak_text))
+            logger.info(f"Greeting handler spoke directly: {speak_text!r}")
+        except Exception as e:
+            logger.warning(f"Greeting handler TTSSpeakFrame failed: {e}")
 
     if intent == "gave_name" and name_given:
         logger.info(f"Name candidate captured: {name_given!r} → confirm")
@@ -1774,6 +2185,15 @@ async def handle_name_confirmation(
     intent = args["intent"]
     corrected = args.get("corrected_name", "").strip()
     candidate = flow_manager.state.get("name_candidate", "").strip()
+    speak_text = args.get("speak", "").strip()
+
+    # Speak the LLM-generated line directly — skips the second LLM call.
+    if speak_text:
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(speak_text))
+            logger.info(f"Confirmation handler spoke directly: {speak_text!r}")
+        except Exception as e:
+            logger.warning(f"Confirmation handler TTSSpeakFrame failed: {e}")
 
     if intent == "confirmed" and candidate:
         logger.info(f"Name confirmed: {candidate!r}")
@@ -1782,7 +2202,9 @@ async def handle_name_confirmation(
             "off_topic_count": 0,
             "current_probe": "opening",
         })
-        return ({}, create_opening_node(flow_manager))
+        # exam question already spoken in the speak field — opening loads
+        # its probe-handling prompt silently, waits for student to respond.
+        return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
     # Student rejected the read-back. If they supplied a corrected name in the
     # same turn, use it directly; otherwise fall through to spell-out.
@@ -1793,7 +2215,8 @@ async def handle_name_confirmation(
             "off_topic_count": 0,
             "current_probe": "opening",
         })
-        return ({}, create_opening_node(flow_manager))
+        # Same: exam question was in the speak field, opening is silent.
+        return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
     logger.info("Name rejected, asking student to spell it out")
     return ({"next_action": "spell_name"}, create_spell_name_node(flow_manager))
@@ -1806,9 +2229,16 @@ async def handle_begin_exam(
     transitions to the opening exam question. If not, stays in the greeting
     node so the bot can reassure them and re-ask."""
     intent = args.get("intent", "ready")
+    speak_text = args.get("speak", "").strip()
+
+    if speak_text:
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(speak_text))
+            logger.info(f"begin_exam handler spoke directly: {speak_text!r}")
+        except Exception as e:
+            logger.warning(f"begin_exam TTSSpeakFrame failed: {e}")
+
     if intent == "not_ready":
-        # Re-render the greeting so the LLM can offer reassurance and re-ask.
-        # The reply will route here again with a fresh intent.
         flow_manager.state["not_ready_count"] = (
             flow_manager.state.get("not_ready_count", 0) + 1
         )
@@ -1826,24 +2256,33 @@ async def handle_begin_exam(
         "off_topic_count": 0,
         "current_probe": "opening",
     })
-    return ({}, create_opening_node(flow_manager))
+    # exam question already spoken in speak field — opening is silent.
+    return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
 
 async def handle_spelled_name(
     args: FlowArgs, flow_manager: FlowManager
 ) -> tuple[dict, NodeConfig]:
     name = args.get("name", "").strip().title()
+    speak_text = args.get("speak", "").strip()
     if not name:
-        # Defensive: shouldn't happen given required=["name"], but if the LLM
-        # gives an empty string fall back to a generic address rather than loop.
         name = "student"
     logger.info(f"Name recorded via spelling: {name!r}")
+
+    if speak_text:
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(speak_text))
+            logger.info(f"spelled_name handler spoke directly: {speak_text!r}")
+        except Exception as e:
+            logger.warning(f"spelled_name TTSSpeakFrame failed: {e}")
+
     flow_manager.state.update({
         "name": name,
         "off_topic_count": 0,
         "current_probe": "opening",
     })
-    return ({}, create_opening_node(flow_manager))
+    # exam question already spoken in speak field — opening is silent.
+    return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
 
 # ─── Flow-spec generation with validation + retry + persistence ───────────────
@@ -2483,6 +2922,7 @@ async def run_bot(
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
     use_turn_markers: str = "auto",
+    enable_auto_summarization: bool = True,
 ):
     # Per-session log file — captures every loguru log line emitted during this
     # session so we can post-mortem any one run without scrolling stdout.
@@ -2519,35 +2959,51 @@ async def run_bot(
         voice_id=tts_voice,
     )
 
+    # LLM call dumper: write every round-trip's input+output to
+    # llm_calls/calls_<session>.jsonl. The /sessions dashboard reads this to
+    # show raw I/O per turn.
+    LLM_CALLS_DIR.mkdir(parents=True, exist_ok=True)
+    _llm_dump_path = LLM_CALLS_DIR / f"calls_{session_id}.jsonl"
+
     if llm_provider == "groq":
         groq_key = os.getenv("GROQ_API_KEY", "")
         if not groq_key:
             raise RuntimeError("GROQ_API_KEY not set in .env")
-        llm = GroqLLMService(
+        llm = _DumpingGroqLLMService(
             api_key=groq_key,
             settings=GroqLLMService.Settings(model=llm_model),
+            _dump_path=_llm_dump_path,
         )
     elif llm_provider == "openai":
         openai_key = os.getenv("OPENAI_API_KEY", "")
         if not openai_key:
             raise RuntimeError("OPENAI_API_KEY not set in .env")
-        llm = OpenAILLMService(
+        llm = _DumpingOpenAILLMService(
             api_key=openai_key,
             settings=OpenAILLMService.Settings(model=llm_model),
+            _dump_path=_llm_dump_path,
         )
     elif llm_provider == "anthropic":
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
         if not anthropic_key:
             raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
-        llm = AnthropicLLMService(
+        llm = _DumpingAnthropicLLMService(
             api_key=anthropic_key,
             settings=AnthropicLLMService.Settings(model=llm_model),
+            _dump_path=_llm_dump_path,
         )
     elif llm_provider == "cerebras":
         from pipecat.services.cerebras.llm import CerebrasLLMService
         cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
         if not cerebras_key:
             raise RuntimeError("CEREBRAS_API_KEY not set in .env")
+        # Wrap CerebrasLLMService with the dumper. Built dynamically because
+        # it's imported lazily — keeps Cerebras as an optional extra.
+        _DumpingCerebrasLLMService = type(
+            "_DumpingCerebrasLLMService",
+            (LLMCallDumperMixin, CerebrasLLMService),
+            {},
+        )
         # gpt-oss-120b ships with reasoning_effort="medium" by default. That
         # adds ~300 reasoning tokens per response and several seconds of LLM
         # time even on short replies — wasted on an oral examiner that just
@@ -2555,20 +3011,44 @@ async def run_bot(
         # supported value (Cerebras does not allow disabling reasoning
         # entirely on gpt-oss-120b). The `extra` dict is spread into the
         # OpenAI-compatible chat-completions call by CerebrasLLMService.
-        llm = CerebrasLLMService(
+        llm = _DumpingCerebrasLLMService(
             api_key=cerebras_key,
             settings=CerebrasLLMService.Settings(
                 model=llm_model,
                 extra={"reasoning_effort": "low"},
             ),
+            _dump_path=_llm_dump_path,
         )
     else:
-        llm = AssessVoxGoogleLLMService(
+        # gemini-3.5-flash defaults to thinking_level="high", which causes
+        # Gemini to emit thought_signature blocks on every model response.
+        # Those signatures are large base64 traces that get replayed in
+        # context on every subsequent call, bloating prompts from ~3K to
+        # 19K+ tokens. Set thinking_level="minimal" to disable thinking-
+        # mode artifacts entirely. The model still produces high-quality
+        # output for our oral-exam workload (no chain-of-thought needed).
+        _gemini_settings = AssessVoxGoogleLLMService.Settings(
+            model=llm_model,
+            thinking=AssessVoxGoogleLLMService.ThinkingConfig(
+                thinking_level="minimal",
+                include_thoughts=False,
+            ),
+        )
+        llm = _DumpingAssessVoxGoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
-            settings=AssessVoxGoogleLLMService.Settings(model=llm_model),
+            settings=_gemini_settings,
+            _dump_path=_llm_dump_path,
         )
 
-    context = LLMContext()
+    # Seed the context with the persona/system message ONCE. pipecat-flows'
+    # _update_llm_context uses ContextStrategy.APPEND on every _set_node call,
+    # which re-injects role_messages into context.messages each time. With 9
+    # nodes and ~3500 tokens of ROLE_MESSAGES, that accumulates to 6+ copies
+    # (≈21K tokens) by the end of a full exam — confirmed in session dumps.
+    # Fix: seed the context here at creation so ROLE_MESSAGES is already
+    # present, then pass role_messages=[] on all nodes so _set_node has
+    # nothing new to append.
+    context = LLMContext(messages=list(ROLE_MESSAGES))
     # ─── Turn-taking config (canonical Pipecat-flows shape) ─────────────────
     # Matches pipecat-flows/examples/insurance_quote.py verbatim. SileroVAD
     # at defaults + boolean `filter_incomplete_user_turns=True` is the
@@ -2649,19 +3129,163 @@ async def run_bot(
     # auto with native-endpoint STT), there's nothing to overrule SmartTurn,
     # so any borderline INCOMPLETE turn pays the full 3 s slack.
     #
-    # stop_secs=2.0 — tuned for the IB oral exam pace where students often
-    # take 0.5-1.5 s mid-thought pauses. At 1.0 s SmartTurn was committing
-    # turns mid-breath, fragmenting one student response into 3-4 separate
-    # LLM calls and producing felt-latency stutter. 3.0 s (pipecat default)
-    # was too loose — added a full 3 s wait whenever the analyzer scored
-    # INCOMPLETE. 2.0 s absorbs natural mid-sentence pauses while keeping
-    # the worst-case ceiling well below the old default. SmartTurn still
-    # short-circuits instantly when it scores COMPLETE (most turns).
+    # stop_secs=1.2 — worst-case cap when SmartTurn scores INCOMPLETE.
+    # SmartTurn still short-circuits instantly on COMPLETE (most turns).
+    # 2.0 s was producing visible lag on borderline turns; 1.2 s keeps
+    # the cap tight while still absorbing natural mid-sentence pauses.
     _turn_analyzer = LocalSmartTurnAnalyzerV3(
-        params=SmartTurnParams(stop_secs=2.0)
+        params=SmartTurnParams(stop_secs=1.2)
     )
     _user_turn_strategies = UserTurnStrategies(
         stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_turn_analyzer)],
+    )
+
+    # Pipecat auto-context summarization: when the conversation grows past
+    # ``max_context_tokens``, an async background task asks the LLM to
+    # compress older turns into a short summary, replacing them in-place.
+    # Without this, the prompt grew from 1.3K (turn 1) to 19.2K tokens
+    # (turn 23) — see session 20260615_033722.
+    #
+    # Tuning notes:
+    #   • Earlier thresholds (4K tokens / 14 msgs) fired every probe-advance
+    #     during a 7-minute exam — 4–5 summarizations per session, ~12 s each.
+    #     Net negative for latency. We raise to 15K / 50 so summarization
+    #     fires at most once on a typical exam (and often never).
+    #   • Per pipecat PR #3855, if ``summary_config.llm`` is left None the
+    #     summarization request is sent through the SAME LLMService that's
+    #     producing the spoken response. Same API client, same rate limit
+    #     → the two requests compete and tail-latency on the speech path
+    #     spikes. We route summarization to a DEDICATED Cerebras LLM
+    #     (cheap + fast + separate API key) so it never touches the main
+    #     pipeline.
+    #
+    # Fallback: if CEREBRAS_API_KEY is missing, fall back to the legacy
+    # in-pipeline path with a warning. Better than crashing the bot.
+    _summary_llm = None
+    _cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
+    if _cerebras_key:
+        try:
+            from pipecat.services.cerebras.llm import CerebrasLLMService
+
+            # The dedicated summarizer LLM is invoked by pipecat via
+            # `_generate_summary()` directly — bypassing the pipeline entirely,
+            # so the standard LLMCallDumperMixin (which hooks into push_frame)
+            # would never fire. Subclass and override _generate_summary to
+            # capture input + output + token usage into the JSONL dump.
+            _dump_path_for_summarizer = _llm_dump_path
+
+            class _SummarizingCerebrasLLM(CerebrasLLMService):
+                async def _generate_summary(self, frame):
+                    # Snapshot input (the messages about to be summarized) so
+                    # we can write it AFTER super() returns. Util lives at
+                    # pipecat.utils.context.llm_context_summarization in
+                    # pipecat 1.3+.
+                    from pipecat.utils.context.llm_context_summarization import (
+                        LLMContextSummarizationUtil,
+                    )
+                    input_snapshot = None
+                    try:
+                        sel = LLMContextSummarizationUtil.get_messages_to_summarize(
+                            frame.context, frame.min_messages_to_keep
+                        )
+                        input_snapshot = {
+                            "system": frame.summarization_prompt,
+                            "messages": [
+                                m if isinstance(m, dict) else {"role": getattr(m, "role", "?"), "raw": str(m)}
+                                for m in sel.messages
+                            ],
+                            "target_context_tokens": frame.target_context_tokens,
+                            "min_messages_to_keep": frame.min_messages_to_keep,
+                        }
+                    except Exception as e:
+                        logger.debug(f"summarizer dump: snapshot failed: {e}")
+
+                    ts_in = datetime.now().isoformat(timespec="milliseconds")
+                    try:
+                        result = await super()._generate_summary(frame)
+                        # result = (summary_text, last_summarized_index)
+                        summary_text, last_idx = result
+                    except Exception:
+                        # Still log the failed attempt so the dashboard shows it.
+                        rec = {
+                            "ts": ts_in,
+                            "kind": "summarization",
+                            "service": type(self).__name__,
+                            "model": getattr(self._settings, "model", None),
+                            "input": input_snapshot,
+                            "output": {"text": "", "tool_calls": []},
+                            "usage": None,
+                            "error": "_generate_summary raised",
+                        }
+                        if _dump_path_for_summarizer is not None:
+                            try:
+                                _dump_path_for_summarizer.parent.mkdir(parents=True, exist_ok=True)
+                                with _dump_path_for_summarizer.open("a") as f:
+                                    f.write(json.dumps(rec, default=str) + "\n")
+                            except Exception as we:
+                                logger.warning(f"summarizer dump write failed: {we}")
+                        raise
+
+                    rec = {
+                        "ts": ts_in,
+                        "kind": "summarization",
+                        "service": type(self).__name__,
+                        "model": getattr(self._settings, "model", None),
+                        "input": input_snapshot,
+                        "output": {"text": summary_text, "tool_calls": [],
+                                   "last_summarized_index": last_idx},
+                        "usage": None,   # run_inference path doesn't emit MetricsFrame
+                    }
+                    if _dump_path_for_summarizer is not None:
+                        try:
+                            _dump_path_for_summarizer.parent.mkdir(parents=True, exist_ok=True)
+                            with _dump_path_for_summarizer.open("a") as f:
+                                f.write(json.dumps(rec, default=str) + "\n")
+                        except Exception as we:
+                            logger.warning(f"summarizer dump write failed: {we}")
+                    return result
+
+            _summary_llm = _SummarizingCerebrasLLM(
+                api_key=_cerebras_key,
+                settings=CerebrasLLMService.Settings(
+                    model="gpt-oss-120b",
+                    extra={"reasoning_effort": "low"},
+                ),
+            )
+            logger.info(
+                "Auto-summarization: dedicated LLM = cerebras/gpt-oss-120b "
+                "(off-pipeline, won't compete with main LLM rate limit)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not build dedicated Cerebras summarizer LLM: {e}. "
+                "Falling back to in-pipeline summarization."
+            )
+            _summary_llm = None
+    else:
+        logger.warning(
+            "CEREBRAS_API_KEY not set — auto-summarization will share the "
+            "main pipeline LLM and may add tail latency. Set CEREBRAS_API_KEY "
+            "to route summaries off-pipeline."
+        )
+
+    _auto_summary_cfg = LLMAutoContextSummarizationConfig(
+        # Raised from 4K → 15K: a typical 7-minute oral exam stays well
+        # under this, so summarization fires at most once (or not at all).
+        max_context_tokens=15000,
+        # Disable message-count trigger — let token count drive it alone.
+        # At 50 msgs the trigger fired at ~9K tokens (well under the 15K cap)
+        # because function-routing turns each add 3-4 short messages. Token
+        # count is the right metric for "is this prompt too expensive?".
+        max_unsummarized_messages=None,
+        summary_config=LLMContextSummaryConfig(
+            target_context_tokens=8000,    # keep more detail post-compression
+            min_messages_after_summary=6,  # always keep last 6 turns verbatim
+            summary_message_template=(
+                "Conversation summary so far: {summary}"
+            ),
+            llm=_summary_llm,              # dedicated LLM — None falls back to pipeline LLM
+        ),
     )
 
     context_aggregator = LLMContextAggregatorPair(
@@ -2682,6 +3306,13 @@ async def run_bot(
                 incomplete_long_timeout=25.0,    # ↑ from 10 — "let me think"
             ),
         ),
+        assistant_params=LLMAssistantAggregatorParams(
+            enable_auto_context_summarization=enable_auto_summarization,
+            auto_context_summarization_config=_auto_summary_cfg,
+        ),
+    )
+    logger.info(
+        f"Auto-context summarization: {'ON (LLM compresses older turns at ~4K tokens)' if enable_auto_summarization else 'OFF (full transcript kept verbatim)'}"
     )
 
     # Publish for /api/sessions/{id}/transcript polling
@@ -2919,6 +3550,7 @@ async def run_session(
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
     use_turn_markers: str = "auto",
+    enable_auto_summarization: bool = True,
 ) -> None:
     """Server-friendly entry: caller provides transport, session_id, and a
     pre-generated FlowSpec. CLI mode uses bot() instead."""
@@ -2938,6 +3570,7 @@ async def run_session(
         stt_language=stt_language,
         tts_voice=tts_voice,
         use_turn_markers=use_turn_markers,
+        enable_auto_summarization=enable_auto_summarization,
     )
 
 

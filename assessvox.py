@@ -81,8 +81,35 @@ async def root():
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/sessions", include_in_schema=False)
+async def sessions_page():
+    """Session-inspector dashboard."""
+    return FileResponse(WEB_DIR / "sessions.html")
+
+
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+# ─── Session timeline (dashboard) endpoints ──────────────────────────────────
+
+import session_timeline as _session_timeline
+
+
+@app.get("/api/session-timeline/list")
+async def list_all_sessions():
+    """Newest-first list of every session on disk for the dashboard picker."""
+    return {"sessions": _session_timeline.list_sessions()}
+
+
+@app.get("/api/session-timeline/{session_id}")
+async def get_session_timeline(session_id: str):
+    """Parsed timeline for one session: turns, LLM calls, node transitions,
+    function calls, latency, slack events."""
+    t = _session_timeline.build_timeline(session_id)
+    if t is None:
+        raise HTTPException(404, f"no log file found for session {session_id}")
+    return _session_timeline.timeline_to_dict(t)
 
 
 # ─── Session endpoints ────────────────────────────────────────────────────────
@@ -222,6 +249,11 @@ class CreateSessionRequest(BaseModel):
     #   "off"  — force OFF for every provider (skips the marker call; only safe
     #            when STT or VAD reliably detect end-of-turn on their own)
     use_turn_markers: str = "auto"
+    # When True (default), Pipecat's assistant aggregator runs auto-context
+    # summarization in the background — older turns are compressed via an LLM
+    # call so the per-turn prompt stays bounded. Set False to disable on short
+    # sessions or for debugging.
+    enable_auto_summarization: bool = True
 
 
 class CreateSessionResponse(BaseModel):
@@ -415,6 +447,7 @@ async def create_session(req: CreateSessionRequest):
         "tts_voice": (req.tts_voice or "").strip()
                      or "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
         "use_turn_markers": (req.use_turn_markers or "auto").strip().lower(),
+        "enable_auto_summarization": bool(req.enable_auto_summarization),
         "image_url": image_url,
     }
 
@@ -531,6 +564,7 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             stt_language=s.get("stt_language", "en"),
             tts_voice=s.get("tts_voice", "e07c00bc-4134-4eae-9ea4-1a55fb45746b"),
             use_turn_markers=s.get("use_turn_markers", "auto"),
+            enable_auto_summarization=bool(s.get("enable_auto_summarization", True)),
         )
     except Exception:
         logger.exception(f"bot run failed for session {session_id}")

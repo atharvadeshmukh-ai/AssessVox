@@ -947,6 +947,53 @@
     connect();
   };
 
+  // Local camera tracks — kept so we can stop them on session end.
+  let localTracks = [];
+
+  function _stopCameraAndShowGrading() {
+    // Stop all local camera/mic tracks so the browser camera LED turns off.
+    localTracks.forEach(t => { try { t.stop(); } catch(_) {} });
+    localTracks = [];
+    // Blank the video tile and show a grading overlay instead.
+    const vid = $('local-video');
+    if (vid) { vid.srcObject = null; vid.style.display = 'none'; }
+    const card = $('video-card');
+    if (card) {
+      // Replace camera preview with a grading-in-progress message.
+      let overlay = document.getElementById('video-grading-overlay');
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'video-grading-overlay';
+        overlay.style.cssText = (
+          'padding:24px 16px;text-align:center;color:var(--muted-2);'
+          + 'font-size:11px;letter-spacing:0.8px;line-height:1.8;'
+        );
+        card.appendChild(overlay);
+      }
+      overlay.innerHTML = (
+        '<div style="font-size:13px;color:var(--accent);font-weight:600;'
+        + 'margin-bottom:8px;letter-spacing:1px;">SESSION COMPLETE</div>'
+        + '<div>Uploading recording…</div>'
+        + '<div style="margin-top:6px;color:var(--muted)">Report will appear shortly.</div>'
+      );
+      $('video-status').textContent = 'grading…';
+    }
+  }
+
+  function _updateGradingOverlay(msg) {
+    const overlay = document.getElementById('video-grading-overlay');
+    if (overlay) overlay.innerHTML = msg;
+    const vs = $('video-status');
+    if (vs) vs.textContent = 'grading…';
+  }
+
+  function _hideGradingOverlay() {
+    const overlay = document.getElementById('video-grading-overlay');
+    if (overlay) overlay.remove();
+    const vid = $('local-video');
+    if (vid) vid.style.display = '';
+  }
+
   async function connectLiveKit() {
     if (!sessionData || !sessionData.livekit_token) {
       alert('Missing LiveKit credentials in session response.'); return;
@@ -965,17 +1012,28 @@
     try {
       livekitRoom = new Room();
       livekitRoom.on('disconnected', () => {
-        setStatus('Disconnected', '');
-        $('call-btn').classList.remove('live');
-        $('call-btn').classList.add('ready');
-        $('call-btn-label').textContent = 'Start Exam';
-        $('video-status').textContent = 'disconnected';
-        livekitRoom = null;
-        // Upload recording then trigger grading
-        if (recordedChunks.length > 0) {
-          const blob = new Blob(recordedChunks, { type: 'video/webm' });
-          uploadAndGrade(blob);
+        // Room closed — final safety net in case dataReceived never fired.
+        // Only act if we haven't already handled it via the data message.
+        if (livekitRoom !== null) {
+          livekitRoom = null;
+          _handleExamEnded();
         }
+      });
+
+      // Agent sends { type: "exam_ended", reason: "..." } ~3s before shutdown.
+      // This fires BEFORE the room disconnects so we can stop the camera and
+      // show the grading overlay with clean timing (no flash/flicker).
+      livekitRoom.on('dataReceived', (data) => {
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(data));
+          if (msg.type === 'exam_ended') {
+            console.log('[livekit] exam_ended received, reason:', msg.reason);
+            if (livekitRoom !== null) {
+              livekitRoom = null;   // prevent disconnected handler from double-firing
+              _handleExamEnded();
+            }
+          }
+        } catch (_) {}
       });
       livekitRoom.on('trackSubscribed', (track) => {
         if (track.kind === 'audio') {
@@ -985,6 +1043,7 @@
         }
       });
       const tracks = await createLocalTracks({ audio: true, video: true });
+      localTracks = tracks.map(t => t.mediaStreamTrack);   // keep refs for cleanup
       await livekitRoom.connect(sessionData.livekit_url, sessionData.livekit_token);
       for (const track of tracks) {
         await livekitRoom.localParticipant.publishTrack(track);
@@ -1006,32 +1065,92 @@
       console.error('[livekit]', e);
       setStatus('Video connection failed: ' + e.message, 'err');
       livekitRoom = null;
+      localTracks = [];
       $('call-btn').classList.remove('live');
       $('call-btn').classList.add('ready');
       $('call-btn-label').textContent = 'Start Exam';
     }
   }
 
+  function _handleExamEnded() {
+    // Stop MediaRecorder first so we get the final chunks.
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    // Stop camera — LED off, tile replaced with grading overlay.
+    _stopCameraAndShowGrading();
+    $('call-btn').classList.remove('live');
+    $('call-btn').disabled = true;
+    $('call-btn-label').textContent = 'Grading…';
+    setStatus('Session ended — grading in progress', 'live');
+    // Upload + grade after a short tick to let MediaRecorder flush final chunk.
+    setTimeout(() => {
+      if (recordedChunks.length > 0) {
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        recordedChunks = [];
+        uploadAndGrade(blob);
+      }
+    }, 500);
+  }
+
   function disconnectLiveKit() {
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     if (livekitRoom) livekitRoom.disconnect();
+    // Camera stop + overlay happen in the 'disconnected' / 'dataReceived' handlers.
   }
 
   async function uploadAndGrade(blob) {
     try {
+      _updateGradingOverlay(
+        '<div style="font-size:13px;color:var(--accent);font-weight:600;margin-bottom:8px;">UPLOADING</div>'
+        + '<div>Sending recording to server…</div>'
+        + '<div style="margin-top:6px;color:var(--muted)">This may take 15–30 seconds for large files.</div>'
+      );
       setStatus('Uploading recording…');
       const formData = new FormData();
       formData.append('recording', blob, 'session.webm');
       await fetch(`/api/sessions/${sessionId}/upload-recording`, { method: 'POST', body: formData });
-      setStatus('Grading video…');
-      await fetch(`/api/sessions/${sessionId}/grade-video`, { method: 'POST' });
+
+      _updateGradingOverlay(
+        '<div style="font-size:13px;color:var(--accent);font-weight:600;margin-bottom:8px;">GRADING</div>'
+        + '<div>Gemini is watching the recording…</div>'
+        + '<div style="margin-top:6px;color:var(--muted)">Report usually ready in 60–90 seconds.</div>'
+      );
       setStatus('Grading in progress — report will appear shortly', 'live');
-      // Start polling for the report — same poller used by audio sessions.
+      await fetch(`/api/sessions/${sessionId}/grade-video`, { method: 'POST' });
+
+      // Start polling — when report arrives, hide overlay and re-enable button.
       if (reportPoller) clearInterval(reportPoller);
-      reportPoller = setInterval(pollReport, 3000);
+      reportPoller = setInterval(async () => {
+        if (!sessionId) return;
+        try {
+          const r = await fetch(`/api/sessions/${sessionId}/report`);
+          if (r.ok) {
+            clearInterval(reportPoller); reportPoller = null;
+            const report = await r.json();
+            _hideGradingOverlay();
+            $('call-btn').disabled = false;
+            $('call-btn').classList.remove('live');
+            $('call-btn').classList.add('ready');
+            $('call-btn-label').textContent = 'Start Exam';
+            $('video-status').textContent = 'done';
+            renderReport(report);
+            renderTranscript(report.transcript || []);
+            setStatus('Report ready', 'live');
+            $('hint-text').textContent = 'Exam complete';
+            setThinking(false);
+            setLogLive(false);
+          }
+        } catch (_) {}
+      }, 3000);
     } catch (e) {
       console.error('[upload+grade]', e);
       setStatus('Upload/grade failed: ' + e.message, 'err');
+      _updateGradingOverlay(
+        `<div style="color:var(--bad);font-weight:600;">Upload failed</div>`
+        + `<div style="margin-top:6px;color:var(--muted-2)">${e.message}</div>`
+      );
+      $('call-btn').disabled = false;
+      $('call-btn').classList.add('ready');
+      $('call-btn-label').textContent = 'Start Exam';
     }
   }
 

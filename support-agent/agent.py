@@ -2,38 +2,38 @@
 
 Runs as a long-lived worker that LiveKit Cloud dispatches into any room
 named `assessvox-*`. For each room, it reads the exam spec from
-`ctx.room.metadata` (written by AssessVox when the room was created),
-builds a dynamic system prompt, and runs a Gemini Live realtime session
-with `video_input=True` so the model can see the student.
+`ctx.room.metadata`, builds a dynamic system prompt, and runs a Gemini Live
+realtime session with video_input=True so the model can see the student.
+
+Function tools registered on ExamAgent:
+  - record_student_name    — called after name capture (1 call only)
+  - advance_probe          — called when student answers a probe substantively
+  - off_topic_strike       — called when student is clearly evading
+  - end_exam               — called when time is up OR student requests to stop
 
 Run with:
     uv run python support-agent/agent.py dev
-
-The `dev` subcommand registers the worker with LiveKit Cloud and waits
-for dispatched rooms.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Annotated
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, Agent, JobContext, room_io
+from livekit.agents import AgentSession, Agent, JobContext, llm, room_io
 from livekit.rtc.room import ConnectError
 from livekit.plugins import google, silero
 
-# Allow `python support-agent/agent.py` from the repo root by adding our
-# own directory to the path so `prompts` resolves.
 sys.path.insert(0, str(Path(__file__).parent))
 from prompts import INTERVIEW_INSTRUCTIONS, build_exam_instructions
 
-# Load env from AssessVox root first (where LIVEKIT + GEMINI_API_KEY live),
-# then from our own .env.local for backwards compat.
 load_dotenv(Path(__file__).parent.parent / ".env")
 load_dotenv(Path(__file__).parent / ".env.local")
 
@@ -41,42 +41,179 @@ logger = logging.getLogger("assessvox-video-agent")
 logger.setLevel(logging.INFO)
 
 
-def _build_agent_for_spec(spec: dict | None) -> Agent:
-    instructions = build_exam_instructions(spec) if spec else INTERVIEW_INSTRUCTIONS
-    return Agent(
-        instructions=instructions,
-        llm=google.realtime.RealtimeModel(
-            # Per ai.google.dev/gemini-api/docs/models (June 2026), the public
-            # Live API models are gemini-3.1-flash-live-preview and
-            # gemini-2.5-flash-native-audio-preview-12-2025. The 3.1 preview is
-            # the canonical one. Override via GEMINI_LIVE_MODEL env var.
-            model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
-            voice=os.getenv("GEMINI_LIVE_VOICE", "Puck"),
-            temperature=0.6,
-            api_key=os.getenv("GEMINI_API_KEY"),
-        ),
-    )
+class ExamAgent(Agent):
+    """Agent subclass that carries the exam spec and exposes structured tools.
+
+    Tools are discovered automatically by find_function_tools(self) — any
+    method decorated with @llm.function_tool is registered with the
+    Gemini Live session at start.
+    """
+
+    def __init__(self, spec: dict | None, ctx: JobContext):
+        instructions = build_exam_instructions(spec) if spec else INTERVIEW_INSTRUCTIONS
+        super().__init__(
+            instructions=instructions,
+            llm=google.realtime.RealtimeModel(
+                model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
+                voice=os.getenv("GEMINI_LIVE_VOICE", "Puck"),
+                temperature=0.6,
+                api_key=os.getenv("GEMINI_API_KEY"),
+            ),
+        )
+        self._spec = spec or {}
+        self._ctx = ctx
+
+        # Mutable exam state
+        self._student_name: str = (spec or {}).get("student_name", "") or "the student"
+        self._probes_covered: list[str] = []
+        self._required_probes: set[str] = set((spec or {}).get("required_probes") or [])
+        self._off_topic_strikes: int = 0
+        self._exam_ended: bool = False
+
+    # ─── Tool 1: record student name ──────────────────────────────────────────
+
+    @llm.function_tool
+    async def record_student_name(
+        self,
+        name: Annotated[str, "The student's confirmed first name."],
+    ) -> str:
+        """Call after the student confirms or corrects their name.
+        Call again if they give a different name than the one already recorded.
+        Store it so subsequent probes can address them personally.
+        """
+        self._student_name = name.strip().title()
+        logger.info(f"Student name recorded: {self._student_name!r}")
+        return f"Name recorded: {self._student_name}"
+
+    # ─── Tool 2: advance probe ────────────────────────────────────────────────
+
+    @llm.function_tool
+    async def advance_probe(
+        self,
+        probe_id: Annotated[str, "ID of the probe just completed."],
+        depth: Annotated[str, "Depth of the student's answer. Must be exactly 'surface' (brief or partial answer, names a real concept) or 'developed' (detailed answer with reasoning and examples)."],
+        gold_moment: Annotated[str, "A specific vivid insight the student gave (empty string if none)."],
+        recommended_next: Annotated[str, "Probe ID you suggest asking next (from the probe pool)."],
+    ) -> str:
+        """Call when the student has given a substantive answer to a probe —
+        even a short one. This logs progress and tells you what probe to
+        move to next. Do NOT call if the student has not yet answered.
+
+        After calling this, immediately ask the recommended_next probe.
+        """
+        if probe_id not in self._probes_covered:
+            self._probes_covered.append(probe_id)
+        logger.info(
+            f"Probe advanced: {probe_id!r} depth={depth} "
+            f"gold={gold_moment!r} next={recommended_next!r} "
+            f"covered={self._probes_covered}"
+        )
+
+        remaining_required = [p for p in self._required_probes if p not in self._probes_covered]
+        status = (
+            f"Covered so far: {self._probes_covered}. "
+            f"Still required: {remaining_required or 'none — all required probes done'}."
+        )
+        if gold_moment:
+            status += f" Gold moment noted: '{gold_moment}'."
+        return status
+
+    # ─── Tool 3: off-topic strike ─────────────────────────────────────────────
+
+    @llm.function_tool
+    async def off_topic_strike(
+        self,
+        reason: Annotated[str, "Brief description of why this is off-topic."],
+    ) -> str:
+        """Call when the student deliberately evades the question or goes on
+        a completely unrelated tangent. Do NOT call for genuine confusion
+        or nervousness — only for deliberate evasion.
+
+        After calling, redirect the student back to the question.
+        After 3 strikes the exam should be terminated via end_exam.
+        """
+        self._off_topic_strikes += 1
+        logger.info(f"Off-topic strike #{self._off_topic_strikes}: {reason!r}")
+
+        if self._off_topic_strikes >= 3:
+            return (
+                f"Strike {self._off_topic_strikes}/3. "
+                "MANDATORY: immediately call end_exam with "
+                "reason='repeated_off_topic' and speak a firm closing line before ending."
+            )
+        return (
+            f"Strike {self._off_topic_strikes}/3. "
+            f"Redirect the student back to the question."
+        )
+
+    # ─── Tool 4: end exam ─────────────────────────────────────────────────────
+
+    @llm.function_tool
+    async def end_exam(
+        self,
+        reason: Annotated[
+            str,
+            "Why the exam is ending: 'completed', 'student_request', "
+            "'time_up', or 'repeated_off_topic'.",
+        ],
+        closing_words: Annotated[
+            str,
+            "The exact sentence(s) to speak to close the session warmly. "
+            "For student_request: acknowledge their wish and thank them. "
+            "For completed: congratulate and thank them. "
+            "For repeated_off_topic: firm but respectful close. "
+            "Keep it to 1-2 sentences.",
+        ],
+    ) -> str:
+        """Call when:
+        - All required probes are covered and you have wrapped up naturally (reason='completed')
+        - The student explicitly asks to stop / end / finish (reason='student_request')
+        - The time budget is exhausted (reason='time_up')
+        - 3 off-topic strikes have been reached (reason='repeated_off_topic')
+
+        IMPORTANT: speak the closing_words to the student BEFORE this tool
+        fires — the session will close after a short delay.
+        Do NOT call this more than once.
+        """
+        if self._exam_ended:
+            return "Exam already ended."
+        self._exam_ended = True
+        logger.info(f"Exam ending: reason={reason!r}, closing={closing_words!r}")
+
+        # Give TTS a moment to finish speaking the closing line before we drop.
+        async def _delayed_shutdown():
+            # Give TTS ~3s to finish speaking the closing words, then signal
+            # the browser before dropping the room so it can trigger the
+            # upload+grade flow on the client side.
+            await asyncio.sleep(3.0)
+            try:
+                import json as _json
+                payload = _json.dumps({
+                    "type": "exam_ended",
+                    "reason": reason,
+                }).encode()
+                await self._ctx.room.local_participant.publish_data(
+                    payload,
+                    reliable=True,
+                )
+                logger.info("Sent exam_ended data message to browser.")
+            except Exception as e:
+                logger.warning(f"Failed to send exam_ended data message: {e}")
+            await asyncio.sleep(1.0)   # small buffer after message before drop
+            logger.info("Shutting down session after closing words.")
+            self._ctx.shutdown(reason=f"exam_ended:{reason}")
+
+        asyncio.create_task(_delayed_shutdown())
+        return f"Session closing in ~4 seconds. Reason: {reason}."
 
 
 def prewarm(proc):
-    """Called once per warmed child process BEFORE any job is assigned.
-
-    We pre-load Silero VAD here so it's ready in memory when an exam
-    session lands. The model is cached on ``proc.userdata`` so the
-    entrypoint can grab it instead of re-loading.
-
-    With ``num_idle_processes >= 1`` the LiveKit agents framework keeps
-    that many already-prewarmed children sitting in a pool — when a room
-    is dispatched, we pop a hot child instead of forking + importing for
-    ~2.8 seconds. Cuts the cold start from ~3-5s down to ~50ms.
-    """
     proc.userdata["vad"] = silero.VAD.load()
 
 
 async def entrypoint(ctx: JobContext):
     logger.info(f"AssessVox video agent joining room: {ctx.room.name}")
 
-    # Connect with retry — LiveKit Cloud occasionally rejects the first SDP.
     for attempt in range(1, 4):
         try:
             await ctx.connect()
@@ -85,13 +222,10 @@ async def entrypoint(ctx: JobContext):
             if attempt == 3:
                 logger.error(f"Failed to connect after 3 attempts: {e}")
                 raise
-            import asyncio
             wait = attempt * 2
             logger.warning(f"Connect failed (attempt {attempt}/3), retrying in {wait}s: {e}")
             await asyncio.sleep(wait)
 
-    # Read the exam spec from room metadata. AssessVox writes JSON there
-    # when it creates the room.
     spec: dict | None = None
     md = (ctx.room.metadata or "").strip()
     if md:
@@ -107,17 +241,16 @@ async def entrypoint(ctx: JobContext):
     else:
         logger.info("Room metadata empty; using fallback prompt")
 
-    # Reuse the pre-warmed VAD instance if available (loaded in prewarm()).
-    # Falls back to a fresh load if we somehow ended up in a non-prewarmed
-    # process (e.g. running under `dev` without a pool).
     vad = ctx.proc.userdata.get("vad") if hasattr(ctx, "proc") else None
     if vad is None:
         vad = silero.VAD.load()
+
     session = AgentSession(vad=vad)
+    agent = ExamAgent(spec=spec, ctx=ctx)
 
     await session.start(
         room=ctx.room,
-        agent=_build_agent_for_spec(spec),
+        agent=agent,
         room_options=room_io.RoomOptions(
             video_input=True,
             audio_input=True,
@@ -130,8 +263,5 @@ if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,
-        # Keep one child process already forked + VAD-loaded so the next
-        # room dispatch skips the ~2.8s cold start. Tune up if you expect
-        # concurrent sessions; each warmed process costs ~150 MB RAM.
         num_idle_processes=int(os.getenv("ASSESSVOX_LK_IDLE_PROCESSES", "1")),
     ))

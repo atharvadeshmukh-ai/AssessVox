@@ -101,6 +101,7 @@ from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_turn_strategies import (
     UserTurnStrategies,
     FilterIncompleteUserTurnStrategies,
+    ExternalUserTurnStrategies,
 )
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
@@ -120,6 +121,7 @@ from pipecat.transports.daily.transport import DailyParams
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.cartesia.stt import CartesiaSTTService
+from pipecat.services.cartesia.turns.stt import CartesiaTurnsSTTService
 # Deepgram, AssemblyAI, and xAI are lazy-imported inside _build_stt to avoid
 # hard dependency on their SDK extras when the user picks a different provider.
 from pipecat.services.elevenlabs.stt import CommitStrategy, ElevenLabsRealtimeSTTService
@@ -2872,15 +2874,31 @@ def _build_stt(
     lang_code = (stt_language or "").strip() or None
     provider = (stt_provider or "elevenlabs").lower()
 
-    if provider in ("cartesia", "cartesia-ink-whisper", "cartesia-ink-2"):
+    if provider == "cartesia-ink-2":
         if not os.getenv("CARTESIA_API_KEY"):
             raise RuntimeError("CARTESIA_API_KEY not set in .env (required for Cartesia STT)")
-        # ink-2 is English-only at release (May 2026); ink-whisper is multilingual.
-        cartesia_model = "ink-2" if provider == "cartesia-ink-2" else "ink-whisper"
-        cartesia_lang = "en" if cartesia_model == "ink-2" else (lang_code or "en")
+        # CartesiaTurnsSTTService uses Cartesia's v2 WebSocket API (/stt/turns/websocket).
+        # Ink-2 drives turn boundaries natively — turn.start / turn.update / turn.end /
+        # turn.eager_end — and pushes UserStartedSpeakingFrame / UserStoppedSpeakingFrame
+        # directly from semantic endpointing. No Silero VAD or SmartTurn V3 needed;
+        # ExternalUserTurnStrategies lets those external frames control turn flow.
+        # This eliminates the mid-thought fragmentation that caused 3-6 LLM calls
+        # per turn when students paused between phrases.
+        logger.info("STT provider: cartesia / ink-2 (turns v2) | native semantic endpointing")
+        return CartesiaTurnsSTTService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            settings=CartesiaTurnsSTTService.Settings(
+                language=lang_code or "en",
+            ),
+        )
+
+    if provider in ("cartesia", "cartesia-ink-whisper"):
+        if not os.getenv("CARTESIA_API_KEY"):
+            raise RuntimeError("CARTESIA_API_KEY not set in .env (required for Cartesia STT)")
+        cartesia_lang = lang_code or "en"
+        cartesia_model = "ink-whisper"
         logger.info(
-            f"STT provider: cartesia / {cartesia_model} | "
-            f"language={cartesia_lang}"
+            f"STT provider: cartesia / {cartesia_model} | language={cartesia_lang}"
         )
         return CartesiaSTTService(
             api_key=os.getenv("CARTESIA_API_KEY"),
@@ -3248,22 +3266,28 @@ async def run_bot(
         f"{'LLM markers ON (filter_incomplete_user_turns=True)' if _use_marker_mixin else 'native endpointing (markers OFF)'} "
         f"| stt={_stt_lower}"
     )
-    # Custom turn-analyzer config. Pipecat's default is SmartTurn V3 with
-    # stop_secs=3.0 — the analyzer waits 3 s of silence before force-committing
-    # a turn it scored INCOMPLETE. With the marker mixin OFF (mode=off /
-    # auto with native-endpoint STT), there's nothing to overrule SmartTurn,
-    # so any borderline INCOMPLETE turn pays the full 3 s slack.
+    # Turn strategies:
     #
-    # stop_secs=1.2 — worst-case cap when SmartTurn scores INCOMPLETE.
-    # SmartTurn still short-circuits instantly on COMPLETE (most turns).
-    # 2.0 s was producing visible lag on borderline turns; 1.2 s keeps
-    # the cap tight while still absorbing natural mid-sentence pauses.
-    _turn_analyzer = LocalSmartTurnAnalyzerV3(
-        params=SmartTurnParams(stop_secs=1.2)
-    )
-    _user_turn_strategies = UserTurnStrategies(
-        stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_turn_analyzer)],
-    )
+    # cartesia-ink-2 → CartesiaTurnsSTTService (v2 API) emits
+    #   UserStartedSpeakingFrame / UserStoppedSpeakingFrame directly from
+    #   Ink-2's semantic endpointing (turn.start / turn.end events). Silero
+    #   VAD and SmartTurn V3 are redundant and harmful — they would commit
+    #   mid-thought fragments before Ink-2 decides the turn is over.
+    #   ExternalUserTurnStrategies tells the aggregator: "let the STT service
+    #   drive turn boundaries; don't apply VAD/SmartTurn at all."
+    #
+    # All other STTs → SmartTurn V3 with stop_secs=1.2 as the worst-case cap.
+    _use_external_turn_strategies = _stt_lower == "cartesia-ink-2"
+    if _use_external_turn_strategies:
+        _user_turn_strategies = ExternalUserTurnStrategies()
+        logger.info("Turn strategies: ExternalUserTurnStrategies (Ink-2 drives turn boundaries)")
+    else:
+        _turn_analyzer = LocalSmartTurnAnalyzerV3(
+            params=SmartTurnParams(stop_secs=1.2)
+        )
+        _user_turn_strategies = UserTurnStrategies(
+            stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_turn_analyzer)],
+        )
 
     # Pipecat auto-context summarization: when the conversation grows past
     # ``max_context_tokens``, an async background task asks the LLM to
@@ -3395,31 +3419,35 @@ async def run_bot(
         )
 
     _auto_summary_cfg = LLMAutoContextSummarizationConfig(
-        # Raised from 4K → 15K: a typical 7-minute oral exam stays well
-        # under this, so summarization fires at most once (or not at all).
-        max_context_tokens=15000,
-        # Disable message-count trigger — let token count drive it alone.
-        # At 50 msgs the trigger fired at ~9K tokens (well under the 15K cap)
-        # because function-routing turns each add 3-4 short messages. Token
-        # count is the right metric for "is this prompt too expensive?".
-        max_unsummarized_messages=None,
+        # 8K trigger — Gemini Flash TTFB stays flat below ~8K tokens; above
+        # that each extra 1K token costs ~200ms vs ~50ms below. Observed
+        # spike to 3.9s TTFB at 13.5K in session 20260620_214804_b11b11.
+        # Firing at 8K keeps us in the fast zone throughout the exam.
+        # (Previously 15K — didn't fire often enough on fragmented sessions.)
+        max_context_tokens=8000,
+        max_unsummarized_messages=None,    # token count drives it, not msg count
         summary_config=LLMContextSummaryConfig(
-            target_context_tokens=8000,    # keep more detail post-compression
-            min_messages_after_summary=6,  # always keep last 6 turns verbatim
+            # Compress aggressively to 3K — gives ~5K headroom before the
+            # next trigger. At ~400 tok/probe-transition, that's ~12 more
+            # turns before summarization fires again (rarely twice in a
+            # typical 7-min exam).
+            target_context_tokens=3000,
+            min_messages_after_summary=8,  # keep last 8 messages verbatim
             summary_message_template=(
                 "Conversation summary so far: {summary}"
             ),
-            llm=_summary_llm,              # dedicated LLM — None falls back to pipeline LLM
+            llm=_summary_llm,              # dedicated Cerebras — off-pipeline
         ),
     )
 
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            # Ink-2 (CartesiaTurnsSTTService) drives its own turn detection —
+            # SileroVAD would re-interrupt turns that Ink-2 is still holding
+            # open for mid-thought pauses. Pass None to skip Silero entirely.
+            vad_analyzer=None if _use_external_turn_strategies else SileroVADAnalyzer(),
             filter_incomplete_user_turns=_use_marker_mixin,
-            # Explicit SmartTurn config — see above. Override default
-            # stop_secs=3.0 → 1.0 to keep slack bounded when markers are OFF.
             user_turn_strategies=_user_turn_strategies,
             # Defaults are 5 s / 10 s — tuned for snappy dialogue. For an oral
             # exam where students think mid-sentence, the 5 s timer fired as a

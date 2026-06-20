@@ -1026,6 +1026,9 @@
       setStatus('Grading video…');
       await fetch(`/api/sessions/${sessionId}/grade-video`, { method: 'POST' });
       setStatus('Grading in progress — report will appear shortly', 'live');
+      // Start polling for the report — same poller used by audio sessions.
+      if (reportPoller) clearInterval(reportPoller);
+      reportPoller = setInterval(pollReport, 3000);
     } catch (e) {
       console.error('[upload+grade]', e);
       setStatus('Upload/grade failed: ' + e.message, 'err');

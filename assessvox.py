@@ -757,13 +757,16 @@ async def get_session_transcript(session_id: str):
 
 @app.get("/api/sessions/{session_id}/report")
 async def get_session_report(session_id: str):
-    s = _SESSIONS.get(session_id)
-    if not s:
-        raise HTTPException(404, "unknown session")
     report_path = REPORTS_DIR / f"report_{session_id}.json"
-    if not report_path.exists():
-        raise HTTPException(404, "report not ready yet")
-    return JSONResponse(json.loads(report_path.read_text()))
+    # Serve the report if the file exists, regardless of whether the session
+    # is still in memory (handles page-refresh after server restart).
+    if report_path.exists():
+        return JSONResponse(json.loads(report_path.read_text()))
+    # Only 404 with "unknown session" if the session was never created.
+    # Otherwise return "not ready yet" so the poller keeps going.
+    if session_id not in _SESSIONS:
+        raise HTTPException(404, "unknown session")
+    raise HTTPException(404, "report not ready yet")
 
 
 # ─── WebRTC handshake ─────────────────────────────────────────────────────────

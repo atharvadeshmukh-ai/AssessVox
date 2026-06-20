@@ -9,6 +9,8 @@ dependencies = [
     "pipecat-ai-flows>=0.0.21",
     "pipecat-ai[assemblyai,cartesia,daily,deepgram,elevenlabs,google,groq,local-smart-turn-v3,rnnoise,runner,silero,webrtc,xai]>=0.0.86",
     "pipecatcloud>=0.2.4",
+    "livekit>=0.14.0",
+    "livekit-api>=0.7.0",
 ]
 
 [dependency-groups]

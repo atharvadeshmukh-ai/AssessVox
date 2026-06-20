@@ -1,12 +1,14 @@
 """AssessVox — FastAPI server for the 3-panel oral-exam UI.
 
 Endpoints:
-  GET  /                       static UI
-  POST /api/sessions           teacher submits question (+ optional grading prompt)
-  GET  /api/sessions/{id}/flow returns the generated FlowSpec
-  GET  /api/sessions/{id}/report returns the grading report (404 until ready)
-  POST /api/offer              WebRTC SDP exchange, spawns the bot
-  PATCH /api/offer             ICE candidate trickle
+  GET  /                           static UI
+  POST /api/sessions               teacher submits question (+ optional grading prompt)
+  GET  /api/sessions/{id}/flow     returns the generated FlowSpec
+  GET  /api/sessions/{id}/report   returns the grading report (404 until ready)
+  POST /api/offer                  WebRTC SDP exchange, spawns the bot
+  PATCH /api/offer                 ICE candidate trickle
+  POST /api/sessions/{id}/upload-recording  receive video blob from browser
+  POST /api/sessions/{id}/grade-video       trigger multimodal video grading
 
 Run with:  uv run assessvox.py
 Then open: http://localhost:8000
@@ -15,8 +17,11 @@ Then open: http://localhost:8000
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import os
+import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -25,7 +30,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +48,16 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequestHandler,
 )
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+
+# LiveKit — used for video-mode sessions. Import is soft so the server
+# starts even if the package isn't installed (video sessions will simply
+# return an error rather than crashing everything else).
+try:
+    from livekit.api import AccessToken, LiveKitAPI, VideoGrants
+    from livekit.protocol.room import CreateRoomRequest
+    _LIVEKIT_AVAILABLE = True
+except ImportError:
+    _LIVEKIT_AVAILABLE = False
 
 # Local imports
 import dynamic_exam
@@ -260,6 +275,10 @@ class CreateSessionResponse(BaseModel):
     session_id: str
     flow: dict
     image_url: str | None = None
+    requires_video: bool = False
+    livekit_url: str | None = None
+    livekit_token: str | None = None
+    livekit_room: str | None = None
 
 
 @app.get("/api/grading-prompt", response_model=dict)
@@ -359,6 +378,8 @@ async def create_session(req: CreateSessionRequest):
         question_id = (req.question_id or "").strip() or None
         question_text_override: str | None = (req.question or "").strip() or None
         image_url: str | None = None
+        requires_video: bool = False
+        template_video_rubric: str | None = None
         if question_id:
             q = tpl.get_question(question_id)
             if q is None:
@@ -369,6 +390,7 @@ async def create_session(req: CreateSessionRequest):
                             "question_id": question_id},
                 )
             image_url = q.get("image_url") or None
+            requires_video = bool(q.get("requires_video"))
             if not question_text_override:
                 question_text_override = q.get("prompt") or None
 
@@ -387,12 +409,15 @@ async def create_session(req: CreateSessionRequest):
                         "template_id": template_id},
             )
         template_grading_rubric = tpl.grading_rubric
+        template_video_rubric = getattr(tpl, "video_grading_rubric", None)
         # Template-defined duration is the canonical one; req.duration_minutes
         # is only honoured for the custom (LLM) path.
         duration_minutes = flow_spec.duration_minutes
     else:
         # ─── Legacy LLM-generated path ─────────────────────────────────────
         image_url = None
+        requires_video = False
+        template_video_rubric = None
         logger.info(f"Creating session {session_id} | topic={req.question!r}")
         if not (req.question or "").strip():
             raise HTTPException(
@@ -449,7 +474,37 @@ async def create_session(req: CreateSessionRequest):
         "use_turn_markers": (req.use_turn_markers or "auto").strip().lower(),
         "enable_auto_summarization": bool(req.enable_auto_summarization),
         "image_url": image_url,
+        "requires_video": requires_video,
+        "video_grading_rubric": template_video_rubric,
+        "livekit_room": None,
     }
+
+    # ─── Video branch: mint a LiveKit room + student token ─────────────────
+    livekit_url: str | None = None
+    livekit_token: str | None = None
+    livekit_room: str | None = None
+    if requires_video:
+        livekit_room = f"assessvox-{session_id}"
+        student_identity = (req.student_name or "").strip() or f"student-{session_id[-6:]}"
+        exam_spec_for_agent = {
+            "session_id": session_id,
+            "exam_question": flow_spec.exam_question,
+            "topic": flow_spec.topic,
+            "examiner_tone": flow_spec.examiner_tone,
+            "redirect_when_off_topic": flow_spec.redirect_when_off_topic,
+            "duration_minutes": flow_spec.duration_minutes,
+            "required_probes": list(flow_spec.required_probes),
+            "skills_assessed": list(flow_spec.skills_assessed or []),
+            "probe_pool": [p.model_dump() for p in flow_spec.probe_pool],
+            "student_name": (req.student_name or "").strip() or None,
+        }
+        await _create_livekit_room(livekit_room, exam_spec_for_agent)
+        livekit_token, livekit_url = _mint_livekit_token(livekit_room, student_identity)
+        _SESSIONS[session_id]["livekit_room"] = livekit_room
+        logger.info(
+            f"Session {session_id} VIDEO — LiveKit room {livekit_room!r} "
+            f"created, student identity={student_identity!r}"
+        )
 
     logger.info(
         f"Session {session_id} ready | {len(flow_spec.probe_pool)} probes | "
@@ -460,7 +515,201 @@ async def create_session(req: CreateSessionRequest):
         session_id=session_id,
         flow=flow_spec.model_dump(),
         image_url=image_url,
+        requires_video=requires_video,
+        livekit_url=livekit_url,
+        livekit_token=livekit_token,
+        livekit_room=livekit_room,
     )
+
+
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+
+
+def _find_recording(session_id: str) -> Path | None:
+    for ext in ("mp4", "webm", "mov"):
+        p = RECORDINGS_DIR / f"{session_id}.{ext}"
+        if p.exists() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+async def _create_livekit_room(room_name: str, exam_spec: dict) -> None:
+    if not _LIVEKIT_AVAILABLE:
+        raise HTTPException(500, {"error": "livekit_not_installed",
+                                  "message": "Install livekit and livekit-api packages."})
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    url = os.getenv("LIVEKIT_URL")
+    if not (api_key and api_secret and url):
+        raise HTTPException(500, {"error": "livekit_not_configured"})
+    http_url = url.replace("wss://", "https://").replace("ws://", "http://")
+    lk = LiveKitAPI(url=http_url, api_key=api_key, api_secret=api_secret)
+    try:
+        await lk.room.create_room(CreateRoomRequest(
+            name=room_name,
+            metadata=json.dumps(exam_spec),
+            empty_timeout=300,
+            max_participants=4,
+        ))
+    finally:
+        await lk.aclose()
+
+
+def _mint_livekit_token(room_name: str, identity: str) -> tuple[str, str]:
+    if not _LIVEKIT_AVAILABLE:
+        raise HTTPException(500, {"error": "livekit_not_installed"})
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    url = os.getenv("LIVEKIT_URL")
+    if not (api_key and api_secret and url):
+        raise HTTPException(500, {"error": "livekit_not_configured",
+                                  "message": "LIVEKIT_URL / LIVEKIT_API_KEY / "
+                                             "LIVEKIT_API_SECRET must be set in .env."})
+    token = (
+        AccessToken(api_key=api_key, api_secret=api_secret)
+        .with_identity(identity)
+        .with_name(identity)
+        .with_grants(VideoGrants(room_join=True, room=room_name,
+                                 can_publish=True, can_subscribe=True))
+        .with_ttl(dt.timedelta(hours=2))
+    )
+    return token.to_jwt(), url
+
+
+@app.post("/api/sessions/{session_id}/upload-recording")
+async def upload_recording(session_id: str, recording: UploadFile = File(...)):
+    """Receive a recording blob from the browser (client-side MediaRecorder)."""
+    if session_id not in _SESSIONS:
+        raise HTTPException(404, f"unknown session {session_id}")
+    if not _SESSIONS[session_id].get("requires_video"):
+        raise HTTPException(400, f"session {session_id} is not a video session")
+    mt = (recording.content_type or "").lower()
+    ext = "mp4" if "mp4" in mt else ("mov" if "quicktime" in mt or "mov" in mt else "webm")
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RECORDINGS_DIR / f"{session_id}.{ext}"
+    bytes_written = 0
+    with out_path.open("wb") as f:
+        while True:
+            chunk = await recording.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            bytes_written += len(chunk)
+    logger.info(f"Recording uploaded for {session_id}: {bytes_written / 1_000_000:.1f} MB → {out_path}")
+    return {"session_id": session_id, "path": str(out_path),
+            "bytes": bytes_written, "content_type": recording.content_type}
+
+
+@app.post("/api/sessions/{session_id}/grade-video")
+async def grade_video_session(session_id: str, background_tasks: BackgroundTasks):
+    """Trigger multimodal video grading after a LiveKit session ends."""
+    s = _SESSIONS.get(session_id)
+    if not s:
+        raise HTTPException(404, f"unknown session {session_id}")
+    if not s.get("requires_video"):
+        raise HTTPException(400, f"session {session_id} is not a video session")
+
+    report_path = REPORTS_DIR / f"report_{session_id}.json"
+    video_path = _find_recording(session_id)
+    flow_spec = s["flow_spec"]
+    metadata = {
+        "session_id": session_id,
+        "student_name": s.get("student_name"),
+        "topic": flow_spec.topic,
+        "duration_minutes": s.get("duration_minutes"),
+        "cancelled": False,
+        "video_mode": True,
+    }
+
+    if video_path is None:
+        logger.warning(f"grade-video: no recording found for {session_id}")
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        placeholder = {
+            "session_id": session_id, "metadata": metadata,
+            "headline": "Recording unavailable — grading skipped",
+            "summary": "No recording file found. Upload via /api/sessions/{id}/upload-recording first.",
+            "dimensions": {}, "strengths": [], "growth_areas": [], "overall_score": None,
+        }
+        report_path.write_text(json.dumps(placeholder, indent=2))
+        return {"status": "no_recording", "report_path": str(report_path)}
+
+    async def _run_grading():
+        try:
+            await dynamic_exam.grade_exam(
+                wav_path=Path("/dev/null"),
+                metadata=metadata,
+                report_path=report_path,
+                transcript_turns=[],
+                node_trace=[],
+                duration_seconds=float((s.get("duration_minutes") or 10) * 60),
+                exam_question=flow_spec.exam_question,
+                topic=flow_spec.topic,
+                video_path=video_path,
+                custom_video_prompt=s.get("video_grading_rubric"),
+            )
+        except Exception:
+            logger.exception(f"video grading failed for {session_id}")
+
+    background_tasks.add_task(_run_grading)
+    return {"status": "grading_started", "video_path": str(video_path)}
+
+
+# ─── LiveKit worker ───────────────────────────────────────────────────────────
+
+_LK_WORKER_PROC: "subprocess.Popen | None" = None
+
+
+def _spawn_livekit_worker() -> None:
+    global _LK_WORKER_PROC
+    if os.getenv("ASSESSVOX_DISABLE_LK_WORKER", "").strip() in ("1", "true", "yes"):
+        logger.info("ASSESSVOX_DISABLE_LK_WORKER set; skipping worker spawn")
+        return
+    if not (os.getenv("LIVEKIT_URL") and os.getenv("LIVEKIT_API_KEY")
+            and os.getenv("LIVEKIT_API_SECRET")):
+        logger.warning("LiveKit credentials missing — video sessions will have no examiner agent.")
+        return
+    agent_path = Path(__file__).parent / "support-agent" / "agent.py"
+    if not agent_path.exists():
+        logger.warning(f"Agent worker not found at {agent_path} — video sessions disabled")
+        return
+    cmd = [sys.executable, str(agent_path), "dev"]
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    logger.info(f"Spawning LiveKit agent worker: {' '.join(cmd)}")
+    _LK_WORKER_PROC = subprocess.Popen(
+        cmd, cwd=str(Path(__file__).parent), env=env,
+        stdout=sys.stdout, stderr=sys.stderr,
+    )
+    logger.info(f"LiveKit worker spawned (pid={_LK_WORKER_PROC.pid})")
+
+
+def _shutdown_livekit_worker() -> None:
+    global _LK_WORKER_PROC
+    if _LK_WORKER_PROC is None or _LK_WORKER_PROC.poll() is not None:
+        return
+    logger.info(f"Terminating LiveKit worker (pid={_LK_WORKER_PROC.pid})")
+    try:
+        _LK_WORKER_PROC.terminate()
+        try:
+            _LK_WORKER_PROC.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _LK_WORKER_PROC.kill()
+    except Exception as e:
+        logger.warning(f"Error stopping LiveKit worker: {e}")
+
+
+import atexit
+atexit.register(_shutdown_livekit_worker)
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    _spawn_livekit_worker()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    _shutdown_livekit_worker()
 
 
 @app.get("/api/sessions/{session_id}/flow")

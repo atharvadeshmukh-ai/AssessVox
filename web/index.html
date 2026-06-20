@@ -7,6 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- LiveKit JS SDK — for video-mode sessions. ~80 KB gzipped; loaded on all
+       pages but only used when session.requires_video is true. -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"></script>
   <style>
     :root {
       --bg:        #000000;
@@ -541,6 +544,15 @@
         </button>
       </div>
 
+      <!-- Camera tile — shown only for video-mode sessions -->
+      <div class="card" id="video-card" style="display:none;flex:0 0 auto;padding:10px;">
+        <div style="font-size:11px;color:var(--muted-2);letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">
+          Your camera <span id="video-status" style="float:right;color:var(--muted-2);text-transform:none;letter-spacing:0;">waiting</span>
+        </div>
+        <video id="local-video" autoplay muted playsinline
+               style="display:block;width:100%;max-height:340px;background:#000;border-radius:6px;transform:scaleX(-1);"></video>
+      </div>
+
       <div class="card" id="stimulus-card" style="display:none;flex:0 0 auto;padding:10px;">
         <div style="font-size:11px;color:var(--muted-2);letter-spacing:0.6px;text-transform:uppercase;margin-bottom:6px;">Visual stimulus</div>
         <img id="exam-stimulus" alt="Visual stimulus for this oral exam"
@@ -863,6 +875,7 @@
       }
       const data = await r.json();
       sessionId = data.session_id;
+      sessionData = data;
       renderFlow(data.flow);
       const stimCard = $('stimulus-card');
       const stimImg = $('exam-stimulus');
@@ -873,7 +886,9 @@
         stimCard.style.display = 'none';
         stimImg.src = '';
       }
-      setStatus(`Session ${sessionId.slice(-6)} ready`, 'live');
+      // Show camera tile for video sessions
+      $('video-card').style.display = data.requires_video ? '' : 'none';
+      setStatus(`Session ${sessionId.slice(-6)} ready${data.requires_video ? ' (video)' : ''}`, 'live');
       $('call-btn').disabled = false;
       $('call-btn').classList.add('ready');
       $('call-btn').title = 'Start the exam';
@@ -919,9 +934,103 @@
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 
   // ─── Call button — connect / disconnect toggle ──────────────────────────
+  // LiveKit (video-mode) state
+  let livekitRoom = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let sessionData = null;
+
   $('call-btn').onclick = () => {
-    if (pc) disconnect(); else connect();
+    if (livekitRoom) { disconnectLiveKit(); return; }
+    if (pc) { disconnect(); return; }
+    if (sessionData && sessionData.requires_video) { connectLiveKit(); return; }
+    connect();
   };
+
+  async function connectLiveKit() {
+    if (!sessionData || !sessionData.livekit_token) {
+      alert('Missing LiveKit credentials in session response.'); return;
+    }
+    if (!window.LivekitClient) {
+      alert('LiveKit JS SDK failed to load. Check your network connection.'); return;
+    }
+    const { Room, createLocalTracks } = window.LivekitClient;
+    $('call-btn').classList.remove('ready');
+    $('call-btn').classList.add('live');
+    $('call-btn-label').textContent = 'End Exam';
+    setStatus('Connecting to video room…');
+    $('hint-text').textContent = 'Joining video room — the examiner may take 3-4 seconds to be ready…';
+    $('video-status').textContent = 'connecting…';
+    $('log').innerHTML = '<div class="empty">Establishing video connection…</div>';
+    try {
+      livekitRoom = new Room();
+      livekitRoom.on('disconnected', () => {
+        setStatus('Disconnected', '');
+        $('call-btn').classList.remove('live');
+        $('call-btn').classList.add('ready');
+        $('call-btn-label').textContent = 'Start Exam';
+        $('video-status').textContent = 'disconnected';
+        livekitRoom = null;
+        // Upload recording then trigger grading
+        if (recordedChunks.length > 0) {
+          const blob = new Blob(recordedChunks, { type: 'video/webm' });
+          uploadAndGrade(blob);
+        }
+      });
+      livekitRoom.on('trackSubscribed', (track) => {
+        if (track.kind === 'audio') {
+          const el = track.attach();
+          el.style.display = 'none';
+          document.body.appendChild(el);
+        }
+      });
+      const tracks = await createLocalTracks({ audio: true, video: true });
+      await livekitRoom.connect(sessionData.livekit_url, sessionData.livekit_token);
+      for (const track of tracks) {
+        await livekitRoom.localParticipant.publishTrack(track);
+        if (track.kind === 'video') {
+          track.attach($('local-video'));
+        }
+      }
+      $('video-status').textContent = 'live';
+      setStatus('Video session live', 'live');
+      // Start MediaRecorder
+      const stream = new MediaStream(tracks.map(t => t.mediaStreamTrack));
+      const mimeType = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
+        .find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.start(1000);
+    } catch (e) {
+      console.error('[livekit]', e);
+      setStatus('Video connection failed: ' + e.message, 'err');
+      livekitRoom = null;
+      $('call-btn').classList.remove('live');
+      $('call-btn').classList.add('ready');
+      $('call-btn-label').textContent = 'Start Exam';
+    }
+  }
+
+  function disconnectLiveKit() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    if (livekitRoom) livekitRoom.disconnect();
+  }
+
+  async function uploadAndGrade(blob) {
+    try {
+      setStatus('Uploading recording…');
+      const formData = new FormData();
+      formData.append('recording', blob, 'session.webm');
+      await fetch(`/api/sessions/${sessionId}/upload-recording`, { method: 'POST', body: formData });
+      setStatus('Grading video…');
+      await fetch(`/api/sessions/${sessionId}/grade-video`, { method: 'POST' });
+      setStatus('Grading in progress — report will appear shortly', 'live');
+    } catch (e) {
+      console.error('[upload+grade]', e);
+      setStatus('Upload/grade failed: ' + e.message, 'err');
+    }
+  }
 
   async function connect() {
     if (!sessionId) { alert('Generate a flow first.'); return; }

@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AssessVox · Sessions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #000000;
+      --panel:     #0a0a0c;
+      --panel-2:   #111114;
+      --panel-3:   #16171b;
+      --border:    #1f2025;
+      --border-2:  #2a2c33;
+      --text:      #e6e6ea;
+      --muted:     #6b6d75;
+      --muted-2:   #9a9ca5;
+      --accent:    #8aa2e8;
+      --accent-2:  #b8a7e0;
+      --good:      #7ec99a;
+      --warn:      #d4a574;
+      --bad:       #e07070;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'JetBrains Mono', ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 12px; line-height: 1.5;
+      letter-spacing: 0.2px;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-2); }
+
+    header {
+      padding: 12px 22px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 14px;
+    }
+    header h1 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 1.5px; }
+    header .crumb { color: var(--muted-2); font-size: 11px; letter-spacing: 1px; }
+    header .right { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+    main {
+      display: grid; grid-template-columns: 320px 1fr;
+      height: calc(100vh - 47px);
+    }
+
+    /* ─── Left rail: session list ──────────────────────────────────────── */
+    .rail {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      background: var(--panel);
+    }
+    .rail .filter {
+      position: sticky; top: 0; background: var(--panel);
+      padding: 10px 12px; border-bottom: 1px solid var(--border); z-index: 2;
+    }
+    .rail input.search {
+      width: 100%; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border-2); border-radius: 4px;
+      padding: 6px 10px; font: inherit; font-size: 11px;
+      outline: none;
+    }
+    .rail input.search:focus { border-color: var(--accent); }
+    .sess {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .sess:hover { background: var(--panel-2); }
+    .sess.active { background: var(--panel-3); border-left: 2px solid var(--accent); padding-left: 12px; }
+    .sess .top { display: flex; gap: 8px; align-items: center; font-size: 10.5px; }
+    .sess .id { color: var(--muted); }
+    .sess .name { color: var(--text); font-weight: 500; }
+    .sess .badge {
+      font-size: 9px; padding: 1px 5px; border-radius: 2px;
+      border: 1px solid var(--border-2); color: var(--muted-2);
+      letter-spacing: 0.8px; text-transform: uppercase;
+    }
+    .sess .badge.incomplete { color: var(--warn); border-color: var(--warn); }
+    .sess .badge.report { color: var(--good); border-color: var(--good); }
+    .sess .row2 { display: flex; gap: 10px; margin-top: 4px; font-size: 10px; color: var(--muted); }
+    .sess .row2 .pill {
+      padding: 1px 6px; border: 1px solid var(--border-2);
+      border-radius: 2px;
+    }
+
+    /* ─── Detail pane ──────────────────────────────────────────────────── */
+    .detail {
+      overflow-y: auto;
+      padding: 20px 30px 60px;
+    }
+    .empty {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; color: var(--muted); font-size: 11px;
+      letter-spacing: 1px; text-transform: uppercase;
+    }
+
+    .session-header {
+      display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+      padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 18px;
+    }
+    .session-header .title { font-size: 14px; font-weight: 600; letter-spacing: 1px; }
+    .session-header .config {
+      display: flex; gap: 6px; flex-wrap: wrap;
+    }
+    .session-header .config .chip {
+      font-size: 10px; padding: 2px 8px;
+      border: 1px solid var(--border-2); border-radius: 3px;
+      color: var(--muted-2); letter-spacing: 0.5px;
+    }
+    .session-header .config .chip strong { color: var(--text); font-weight: 500; margin-left: 4px; }
+
+    .summary {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px; margin-bottom: 24px;
+    }
+    .stat {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 10px 12px;
+    }
+    .stat .label {
+      font-size: 9px; color: var(--muted-2); letter-spacing: 1.2px;
+      text-transform: uppercase; margin-bottom: 4px;
+    }
+    .stat .value { font-size: 16px; font-weight: 600; }
+    .stat .value.warn { color: var(--warn); }
+    .stat .value.bad { color: var(--bad); }
+    .stat .value.good { color: var(--good); }
+
+    .section {
+      margin-bottom: 26px;
+    }
+    .section h2 {
+      font-size: 10px; font-weight: 600; letter-spacing: 1.8px;
+      color: var(--muted-2); text-transform: uppercase;
+      margin: 0 0 10px;
+    }
+
+    .exam-question {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 12px 14px; font-size: 11.5px; line-height: 1.55;
+      color: var(--muted-2);
+    }
+    .exam-question strong { color: var(--text); font-weight: 500; }
+
+    /* ─── Latency chart ────────────────────────────────────────────────── */
+    .latency-chart {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 14px;
+    }
+    .latency-chart svg { width: 100%; height: auto; }
+    .legend {
+      display: flex; gap: 14px; font-size: 10px;
+      margin-top: 10px; color: var(--muted-2);
+    }
+    .legend .item { display: flex; align-items: center; gap: 5px; }
+    .legend .swatch { width: 10px; height: 10px; border-radius: 1px; }
+
+    /* ─── Visit-order ribbon ───────────────────────────────────────────── */
+    .visit-ribbon {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 12px 14px; margin-top: 12px;
+      overflow-x: auto; white-space: nowrap;
+    }
+    .visit-ribbon .vlabel {
+      font-size: 9px; color: var(--muted); letter-spacing: 1.2px;
+      text-transform: uppercase; margin-bottom: 8px;
+    }
+    .visit-ribbon .pill-row {
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .visit-ribbon .vpill {
+      display: inline-block; padding: 5px 10px;
+      background: var(--panel-2); border: 1px solid var(--border-2);
+      border-radius: 3px; font-size: 10.5px; color: var(--text);
+      letter-spacing: 0.4px;
+    }
+    .visit-ribbon .vpill.probe { color: var(--accent-2); border-color: var(--accent-2); }
+    .visit-ribbon .vpill.scaffold { color: var(--accent); border-color: var(--accent); }
+    .visit-ribbon .varrow { color: var(--muted); font-size: 11px; }
+    .visit-ribbon .vidx {
+      display: block; font-size: 8.5px; color: var(--muted);
+      letter-spacing: 0.5px; margin-top: 3px; text-align: center;
+    }
+
+    /* ─── Turn rows ────────────────────────────────────────────────────── */
+    .turn {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 12px 14px; margin-bottom: 10px;
+      border-left: 3px solid var(--border);
+    }
+    .turn.single-call { border-left-color: var(--good); }
+    .turn.two-call { border-left-color: var(--warn); }
+    .turn.slack-hit { border-left-color: var(--bad); }
+    .turn .head {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      font-size: 10px; color: var(--muted-2);
+      margin-bottom: 8px;
+    }
+    .turn .head .idx { font-weight: 600; color: var(--text); }
+    .turn .head .class-badge {
+      padding: 1px 7px; border-radius: 2px; font-size: 9px;
+      letter-spacing: 0.8px; text-transform: uppercase;
+    }
+    .turn.single-call .class-badge { color: var(--good); border: 1px solid var(--good); }
+    .turn.two-call .class-badge { color: var(--warn); border: 1px solid var(--warn); }
+    .turn.slack-hit .class-badge { color: var(--bad); border: 1px solid var(--bad); }
+    .turn .head .v2v {
+      margin-left: auto; font-size: 11px;
+      color: var(--text); font-weight: 600;
+    }
+
+    .utterance { margin: 8px 0; }
+    .utterance .speaker {
+      display: inline-block; font-size: 9px; letter-spacing: 1.2px;
+      padding: 1px 6px; border-radius: 2px; margin-right: 8px;
+      vertical-align: top;
+    }
+    .utterance.student .speaker {
+      background: var(--panel-3); color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .utterance.bot .speaker {
+      background: var(--panel-3); color: var(--accent-2);
+      border: 1px solid var(--accent-2);
+    }
+    .utterance .text {
+      display: inline; font-size: 12px; line-height: 1.6;
+    }
+    .utterance.student .text { color: var(--text); }
+    .utterance.bot .text { color: var(--muted-2); }
+
+    .events {
+      margin-top: 10px; padding-top: 8px;
+      border-top: 1px dashed var(--border-2);
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 10.5px;
+    }
+    .events .ev {
+      display: flex; gap: 8px; align-items: baseline;
+      color: var(--muted-2);
+    }
+    .events .ev .tag {
+      flex: 0 0 80px; font-size: 9px; letter-spacing: 0.8px;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .events .ev.llm-function .tag { color: var(--warn); }
+    .events .ev.llm-speech .tag { color: var(--good); }
+    .events .ev.function .tag { color: var(--accent); }
+    .events .ev.node .tag { color: var(--accent-2); }
+    .events .ev.slack .tag { color: var(--bad); }
+    .events .ev.gap .tag { color: var(--muted); }
+    .events .ev.gap .body { color: var(--muted); font-style: italic; }
+    .events .ev.gap .ms { color: var(--muted); }
+    .events .ev .body { color: var(--text); }
+    .events .ev .ms { margin-left: auto; color: var(--muted); }
+    .events .total-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding-top: 6px; margin-top: 4px;
+      border-top: 1px solid var(--border-2);
+      font-size: 10px; color: var(--muted-2);
+    }
+    .events .total-row .total-label { letter-spacing: 0.8px; text-transform: uppercase; }
+    .events .total-row .total-sum { color: var(--muted-2); }
+    .events .total-row .total-v2v { font-weight: 600; color: var(--text); }
+
+    .no-data {
+      padding: 14px; text-align: center; color: var(--muted);
+      font-size: 11px; font-style: italic;
+      border: 1px dashed var(--border-2); border-radius: 4px;
+    }
+
+    /* ─── Raw LLM I/O inline expander ──────────────────────────────────── */
+    .raw-toggle {
+      margin-top: 10px; padding: 5px 10px;
+      background: var(--panel-2); color: var(--muted-2);
+      border: 1px solid var(--border-2); border-radius: 3px;
+      font: inherit; font-size: 10px; letter-spacing: 1px;
+      text-transform: uppercase; cursor: pointer;
+    }
+    .raw-toggle:hover { color: var(--accent); border-color: var(--accent); }
+    .raw-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+    .raw-toggle .count { color: var(--text); font-weight: 600; margin-left: 4px; }
+
+    .raw-panel {
+      margin-top: 10px; padding: 10px 12px;
+      background: var(--panel-3); border: 1px solid var(--border-2);
+      border-radius: 4px;
+      display: none;
+    }
+    .raw-panel.open { display: block; }
+    .raw-call {
+      margin-bottom: 18px; padding: 12px 14px;
+      background: var(--panel-2);
+      border: 1px solid var(--border-2);
+      border-left: 3px solid var(--border-2);
+      border-radius: 4px;
+    }
+    .raw-call.role-function { border-left-color: var(--warn); }
+    .raw-call.role-speech { border-left-color: var(--good); }
+    .raw-call:last-child { margin-bottom: 0; }
+    .raw-call .rc-head {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      font-size: 10px; color: var(--muted-2); margin-bottom: 10px;
+      padding-bottom: 8px; border-bottom: 1px solid var(--border);
+    }
+    .raw-call .rc-head .rc-idx { color: var(--text); font-weight: 600; font-size: 11px; letter-spacing: 0.5px; }
+    .raw-call .rc-head .rc-role {
+      padding: 1px 7px; border-radius: 2px; font-size: 9px;
+      letter-spacing: 0.8px; text-transform: uppercase;
+    }
+    .raw-call.role-function .rc-head .rc-role { color: var(--warn); border: 1px solid var(--warn); }
+    .raw-call.role-speech .rc-head .rc-role { color: var(--good); border: 1px solid var(--good); }
+    .raw-call .rc-head .rc-model { color: var(--accent); }
+    .raw-call .rc-head .rc-tokens {
+      margin-left: auto; color: var(--muted-2); font-size: 10px;
+      padding: 1px 7px; background: var(--panel-3); border-radius: 2px;
+    }
+    .raw-call .rc-head .rc-tokens strong { color: var(--text); font-weight: 600; }
+
+    /* ─── Inter-turn summarization band ────────────────────────────────── */
+    .sum-band {
+      margin: 10px 0; padding: 10px 14px;
+      background: linear-gradient(90deg, var(--panel-2) 0%, var(--panel-3) 100%);
+      border: 1px dashed var(--border-2);
+      border-left: 3px solid var(--accent-2);
+      border-radius: 4px;
+      font-size: 10.5px;
+      cursor: pointer;
+    }
+    .sum-band:hover { border-color: var(--accent-2); }
+    .sum-band .sb-head {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      color: var(--muted-2);
+    }
+    .sum-band .sb-tag {
+      font-size: 9px; letter-spacing: 1.2px; text-transform: uppercase;
+      color: var(--accent-2);
+      padding: 1px 7px; border: 1px solid var(--accent-2); border-radius: 2px;
+    }
+    .sum-band .sb-stats { color: var(--text); }
+    .sum-band.error .sb-tag { color: var(--bad); border-color: var(--bad); }
+    .sum-band.error { border-left-color: var(--bad); }
+    .sum-band .sb-time { margin-left: auto; color: var(--muted); }
+    .sum-band .sb-body {
+      display: none; margin-top: 10px;
+      padding-top: 10px; border-top: 1px solid var(--border);
+    }
+    .sum-band.open .sb-body { display: block; }
+    .sum-band .sb-hint { color: var(--muted); font-size: 9.5px; letter-spacing: 0.5px; }
+    .raw-block {
+      margin: 6px 0; border: 1px solid var(--border);
+      border-radius: 3px; overflow: hidden;
+    }
+    .raw-block .rb-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; background: var(--panel-2);
+      font-size: 10px; letter-spacing: 1px; color: var(--muted-2);
+      text-transform: uppercase;
+    }
+    .raw-block.input  .rb-head { color: var(--accent); }
+    .raw-block.output .rb-head { color: var(--good); }
+    .raw-block.tools  .rb-head { color: var(--accent-2); }
+    .raw-block .rb-copy {
+      margin-left: auto; padding: 2px 8px;
+      background: transparent; color: var(--muted-2);
+      border: 1px solid var(--border-2); border-radius: 2px;
+      font: inherit; font-size: 9px; letter-spacing: 1px;
+      text-transform: uppercase; cursor: pointer;
+    }
+    .raw-block .rb-copy:hover { color: var(--accent); border-color: var(--accent); }
+    .raw-block pre {
+      margin: 0; padding: 10px 12px;
+      background: var(--panel); color: var(--text);
+      font: inherit; font-size: 10.5px; line-height: 1.55;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: none;
+    }
+    .raw-block.system pre { color: var(--muted-2); }
+
+    /* ─── Message blocks (labeled chronological view) ──────────────────── */
+    .msg-blocks {
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .msg-block {
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 3px;
+      background: var(--panel);
+      padding: 8px 12px;
+    }
+    .msg-block.persona     { border-left-color: var(--accent-2); }
+    .msg-block.node-prompt { border-left-color: var(--accent); }
+    .msg-block.bot-said    { border-left-color: var(--good); }
+    .msg-block.student     { border-left-color: var(--accent); background: var(--panel-3); }
+    .msg-block.tool-call   { border-left-color: var(--warn); }
+    .msg-block.tool-result { border-left-color: var(--muted); }
+    .msg-block.thought     { border-left-color: var(--border-2); opacity: 0.5; }
+    .msg-block.other       { border-left-color: var(--border-2); }
+
+    .msg-block .mb-head {
+      display: flex; gap: 8px; align-items: baseline;
+      font-size: 9px; letter-spacing: 1.2px; text-transform: uppercase;
+      color: var(--muted-2); margin-bottom: 4px;
+    }
+    .msg-block .mb-head .mb-idx { color: var(--muted); }
+    .msg-block .mb-head .mb-kind { color: var(--text); font-weight: 600; }
+    .msg-block.persona     .mb-head .mb-kind { color: var(--accent-2); }
+    .msg-block.node-prompt .mb-head .mb-kind { color: var(--accent); }
+    .msg-block.bot-said    .mb-head .mb-kind { color: var(--good); }
+    .msg-block.tool-call   .mb-head .mb-kind { color: var(--warn); }
+    .msg-block .mb-head .mb-len {
+      margin-left: auto; color: var(--muted); font-size: 9px;
+      font-weight: normal; letter-spacing: 0.5px;
+    }
+    .msg-block .mb-body {
+      font-size: 11px; line-height: 1.55; color: var(--text);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .msg-block pre.mb-json {
+      margin: 4px 0 0; padding: 6px 8px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 2px;
+      font: inherit; font-size: 10px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word;
+      color: var(--muted-2);
+    }
+    .raw-toggle.json-mode { color: var(--muted); }
+
+    .loading { padding: 30px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>ASSESSVOX</h1>
+  <span class="crumb">/ sessions</span>
+  <div class="right">
+    <a href="/">← Back to live exam</a>
+  </div>
+</header>
+
+<main>
+  <div class="rail">
+    <div class="filter">
+      <input id="search" class="search" placeholder="Search by id / name / llm / stt…" autocomplete="off" />
+    </div>
+    <div id="session-list"></div>
+  </div>
+
+  <div class="detail" id="detail">
+    <div class="empty">Select a session from the list</div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+let ALL_SESSIONS = [];
+let ACTIVE_SESSION_ID = null;
+
+async function loadSessions() {
+  const r = await fetch('/api/session-timeline/list');
+  const data = await r.json();
+  ALL_SESSIONS = data.sessions || [];
+  renderSessionList(ALL_SESSIONS);
+}
+
+function renderSessionList(items) {
+  const list = $('session-list');
+  list.innerHTML = '';
+  if (!items.length) {
+    list.innerHTML = '<div class="no-data" style="margin:12px">No sessions found.</div>';
+    return;
+  }
+  for (const s of items) {
+    const row = document.createElement('div');
+    row.className = 'sess' + (s.id === ACTIVE_SESSION_ID ? ' active' : '');
+    row.onclick = () => loadDetail(s.id);
+    const dateStr = s.started_at ? s.started_at.slice(0, 16) : s.id;
+    row.innerHTML = `
+      <div class="top">
+        <span class="name">${s.student_name ? esc(s.student_name) : '(unnamed)'}</span>
+        ${s.is_complete ? '' : '<span class="badge incomplete">incomplete</span>'}
+        ${s.has_report ? '<span class="badge report">report</span>' : ''}
+      </div>
+      <div class="row2">
+        <span class="pill">${esc(s.llm || '?')}</span>
+        <span class="pill">${esc(s.stt || '?')}</span>
+        <span>${s.turn_count} turns</span>
+      </div>
+      <div class="row2">
+        <span class="id">${esc(dateStr)}</span>
+      </div>
+    `;
+    list.appendChild(row);
+  }
+}
+
+function filterSessions(q) {
+  q = q.toLowerCase();
+  if (!q) return renderSessionList(ALL_SESSIONS);
+  const filtered = ALL_SESSIONS.filter(s => {
+    const hay = [s.id, s.student_name, s.llm, s.stt].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  renderSessionList(filtered);
+}
+
+async function loadDetail(id) {
+  ACTIVE_SESSION_ID = id;
+  // refresh active state in rail
+  document.querySelectorAll('.sess').forEach(el => el.classList.remove('active'));
+  for (const el of document.querySelectorAll('.sess')) {
+    if (el.querySelector('.id')?.textContent?.includes(id)) el.classList.add('active');
+  }
+  const detail = $('detail');
+  detail.innerHTML = '<div class="loading">Loading…</div>';
+  try {
+    const r = await fetch(`/api/session-timeline/${id}`);
+    if (!r.ok) {
+      const err = await r.text();
+      detail.innerHTML = `<div class="no-data" style="margin-top:20px">Failed to load: ${esc(err)}</div>`;
+      return;
+    }
+    const t = await r.json();
+    renderDetail(t);
+  } catch (e) {
+    detail.innerHTML = `<div class="no-data" style="margin-top:20px">Error: ${esc(String(e))}</div>`;
+  }
+}
+
+function renderDetail(t) {
+  const summary = t.summary || {};
+  const cfg = [
+    ['LLM', t.llm],
+    ['STT', t.stt],
+    ['Turn markers', t.turn_marker_mode],
+    ['Student', t.student_name],
+  ].filter(([_, v]) => v != null);
+
+  const cfgChips = cfg.map(([k, v]) =>
+    `<span class="chip">${esc(k)}<strong>${esc(String(v))}</strong></span>`
+  ).join('');
+
+  const v2vClass = (ms) => ms == null ? '' : (ms < 2500 ? 'good' : ms < 5000 ? 'warn' : 'bad');
+
+  const html = `
+    <div class="session-header">
+      <div class="title">${esc(t.session_id)}</div>
+      <div class="config">${cfgChips}</div>
+    </div>
+
+    ${t.exam_question ? `
+      <div class="section">
+        <h2>Exam question</h2>
+        <div class="exam-question"><strong>${esc(t.exam_question)}</strong></div>
+      </div>
+    ` : ''}
+
+    <div class="summary">
+      <div class="stat"><div class="label">Turns</div><div class="value">${summary.turn_count ?? '—'}</div></div>
+      <div class="stat"><div class="label">Median V2V</div>
+        <div class="value ${v2vClass(summary.median_v2v_ms)}">${fmtMs(summary.median_v2v_ms)}</div></div>
+      <div class="stat"><div class="label">Worst V2V</div>
+        <div class="value ${v2vClass(summary.max_v2v_ms)}">${fmtMs(summary.max_v2v_ms)}</div></div>
+      <div class="stat"><div class="label">Best V2V</div>
+        <div class="value ${v2vClass(summary.min_v2v_ms)}">${fmtMs(summary.min_v2v_ms)}</div></div>
+      <div class="stat"><div class="label">Two-call turns</div>
+        <div class="value ${summary.two_call_turns > 0 ? 'warn' : ''}">${summary.two_call_turns ?? 0}</div></div>
+      <div class="stat"><div class="label">Slack-hit turns</div>
+        <div class="value ${summary.slack_hits > 0 ? 'bad' : ''}">${summary.slack_hits ?? 0}</div></div>
+      <div class="stat"><div class="label">Summarizations</div>
+        <div class="value ${summary.summarization_count > 0 ? 'warn' : ''}">${summary.summarization_count ?? 0}</div></div>
+    </div>
+
+    <div class="section">
+      <h2>Voice-to-voice latency per turn</h2>
+      <div class="latency-chart" id="latency-chart"></div>
+      <div class="legend">
+        <div class="item"><div class="swatch" style="background:var(--good)"></div>single-call</div>
+        <div class="item"><div class="swatch" style="background:var(--warn)"></div>two-call (function-routing)</div>
+        <div class="item"><div class="swatch" style="background:var(--bad)"></div>slack-hit (turn-end stop_secs cap)</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Visit order &middot; visited path + skipped probes</h2>
+      <div class="visit-ribbon" id="visit-ribbon"></div>
+    </div>
+
+    <div class="section">
+      <h2>Conversation tape</h2>
+      <div id="turns"></div>
+    </div>
+  `;
+  $('detail').innerHTML = html;
+
+  renderLatencyChart(t);
+  renderNodeGraph(t);
+  renderTurns(t);
+}
+
+function renderLatencyChart(t) {
+  const turns = t.turns || [];
+  if (!turns.length) {
+    $('latency-chart').innerHTML = '<div class="no-data">No turn data.</div>';
+    return;
+  }
+  const W = 760, H = 200, padL = 50, padR = 14, padT = 14, padB = 30;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const maxMs = Math.max(7000, ...turns.map(x => x.voice_to_voice_ms || 0));
+  const barW = Math.max(8, innerW / Math.max(turns.length, 1) - 6);
+  const stepX = innerW / Math.max(turns.length, 1);
+  const colorFor = (k) => k === 'single-call' ? '#7ec99a' : k === 'two-call' ? '#d4a574' : k === 'slack-hit' ? '#e07070' : '#6b6d75';
+
+  // y-grid lines at 2k, 4k, 6k ms
+  const grid = [2000, 4000, 6000].filter(g => g <= maxMs).map(g => {
+    const y = padT + innerH - (g / maxMs) * innerH;
+    return `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#1f2025" stroke-dasharray="2 3"/>
+            <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="#6b6d75" font-size="9">${g}ms</text>`;
+  }).join('');
+
+  const bars = turns.map((tn, i) => {
+    const v = tn.voice_to_voice_ms || 0;
+    const x = padL + i * stepX + (stepX - barW) / 2;
+    const h = (v / maxMs) * innerH;
+    const y = padT + innerH - h;
+    return `<g>
+      <rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${colorFor(tn.classification)}" opacity="0.85">
+        <title>Turn ${i}: ${v}ms · ${tn.classification}${tn.function_calls.length ? ' · fn:' + tn.function_calls.join(',') : ''}</title>
+      </rect>
+      <text x="${x + barW / 2}" y="${padT + innerH + 14}" text-anchor="middle" fill="#6b6d75" font-size="9">${i}</text>
+    </g>`;
+  }).join('');
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+    ${grid}
+    ${bars}
+    <line x1="${padL}" y1="${padT + innerH}" x2="${W - padR}" y2="${padT + innerH}" stroke="#2a2c33"/>
+  </svg>`;
+  $('latency-chart').innerHTML = svg;
+}
+
+// Visit-order ribbon + skipped-probes footer. No static topology chart —
+// pipecat-flows edges are runtime-dynamic and any pre-laid-out diagram is at
+// best a misleading approximation. The ribbon shows what actually happened.
+function renderNodeGraph(t) {
+  const ribbonHost = $('visit-ribbon');
+  const nodes = t.flow_nodes || [];
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const trace = t.visited_nodes || [];
+  const visited = new Set(trace);
+
+  if (!trace.length) {
+    ribbonHost.innerHTML = '<div class="vlabel">Visit order</div><div style="color:var(--muted);font-size:11px">No node transitions recorded.</div>';
+    return;
+  }
+
+  const pills = trace.map((id, i) => {
+    const kind = byId[id]?.kind || 'other';
+    return `<span class="pill-row"><span class="vpill ${esc(kind)}">${esc(id)}<span class="vidx">#${i}</span></span>${i < trace.length - 1 ? '<span class="varrow">→</span>' : ''}</span>`;
+  }).join('');
+
+  // Skipped probes: any node in the FlowSpec probe_pool that was never visited.
+  const skippedProbes = nodes
+    .filter(n => n.kind === 'probe' && !visited.has(n.id))
+    .map(n => n.id);
+  const skippedFooter = skippedProbes.length
+    ? `<div class="vlabel" style="margin-top:14px">Skipped probes · ${skippedProbes.length} of ${nodes.filter(n=>n.kind==='probe').length}</div>
+       <div>${skippedProbes.map(id => `<span class="vpill probe" style="opacity:0.5">${esc(id)}</span>`).join(' ')}</div>`
+    : '';
+
+  ribbonHost.innerHTML = `
+    <div class="vlabel">Visit order · ${trace.length} transitions</div>
+    <div>${pills}</div>
+    ${skippedFooter}
+  `;
+}
+
+function renderTurns(t) {
+  const container = $('turns');
+  const turns = t.turns || [];
+  if (!turns.length) {
+    container.innerHTML = '<div class="no-data">No turns recorded.</div>';
+    return;
+  }
+  // Group summarization events by which turn they fall AFTER.
+  const sumByAfter = {};
+  (t.summarization_events || []).forEach((ev, idx) => {
+    const key = ev.after_turn_index;
+    if (!sumByAfter[key]) sumByAfter[key] = [];
+    sumByAfter[key].push({ ev, idx });
+  });
+  // Bands that occurred before any turn (after_turn_index === -1) go up top.
+  const preBands = (sumByAfter[-1] || [])
+    .map(({ ev, idx }) => renderSummarizationBandHtml(ev, idx))
+    .join('');
+  container.innerHTML = preBands + turns.map(tn => {
+    const events = [];
+    for (const fn of tn.function_calls) {
+      events.push(`<div class="ev function"><div class="tag">function</div><div class="body">${esc(fn)}( )</div></div>`);
+    }
+    for (const node of tn.node_transitions) {
+      events.push(`<div class="ev node"><div class="tag">→ node</div><div class="body">${esc(node)}</div></div>`);
+    }
+    for (const llm of tn.llm_calls) {
+      const cls = llm.role === 'function' ? 'llm-function' : 'llm-speech';
+      const tag = llm.role === 'function' ? 'LLM call (fn)' : 'LLM call';
+      events.push(`<div class="ev ${cls}"><div class="tag">${tag}</div><div class="body">${esc(llm.service)}${llm.model ? ' · ' + esc(llm.model) : ''}</div><div class="ms">${llm.ttfb_ms}ms</div></div>`);
+    }
+    for (const slack of tn.slack_events_ms) {
+      events.push(`<div class="ev slack"><div class="tag">slack</div><div class="body">SmartTurn stop_secs cap fired</div><div class="ms">${Math.round(slack)}ms</div></div>`);
+    }
+    if (tn.stt_ms != null) {
+      events.unshift(`<div class="ev"><div class="tag">STT</div><div class="body">transcribe</div><div class="ms">${tn.stt_ms}ms</div></div>`);
+    }
+    if (tn.tts_ms != null) {
+      events.push(`<div class="ev"><div class="tag">TTS</div><div class="body">first audio chunk</div><div class="ms">${tn.tts_ms}ms</div></div>`);
+    }
+
+    // Compute measured sum and gap.
+    // The breakdown values are all TTFBs, not durations. Their sum is always
+    // less than V2V because:
+    //   - VAD silence + SmartTurn endpointing happens BEFORE STT fires
+    //   - For Gemini two-call turns, call #1's latency is hidden (deferred
+    //     TTFB only fires on first TEXT token; the routing call has no text)
+    //   - Services run sequentially so wall-clock also includes handoff overhead
+    const measuredMs = (tn.stt_ms || 0)
+      + tn.llm_calls.reduce((s, c) => s + (c.ttfb_ms || 0), 0)
+      + (tn.tts_ms || 0);
+    const v2v = tn.voice_to_voice_ms;
+    const gapMs = v2v != null ? v2v - measuredMs : null;
+
+    // Only show the gap row when there's meaningful unaccounted time (>100ms)
+    // and we have a V2V number to compare against.
+    if (gapMs != null && gapMs > 100) {
+      const gapReason = tn.classification === 'two-call'
+        ? 'VAD endpointing + hidden routing-call latency'
+        : 'VAD endpointing + SmartTurn overhead';
+      events.push(`<div class="ev gap"><div class="tag">unaccounted</div><div class="body">${esc(gapReason)}</div><div class="ms">${gapMs}ms</div></div>`);
+    }
+
+    // Always show a total row so the user can see measured vs actual.
+    if (v2v != null && events.length) {
+      events.push(`<div class="total-row">
+        <span class="total-label">ttfb sum</span>
+        <span class="total-sum">${measuredMs}ms measured</span>
+        <span class="total-v2v">= ${v2v}ms voice-to-voice</span>
+      </div>`);
+    }
+    const rawCount = (tn.raw_calls || []).length;
+    const rawToggle = rawCount > 0
+      ? `<button class="raw-toggle" data-turn="${tn.index}">show raw LLM I/O<span class="count">${rawCount}</span></button>
+         <div class="raw-panel" id="raw-${tn.index}">${renderRawCallsHtml(tn.raw_calls)}</div>`
+      : `<button class="raw-toggle" disabled title="No raw LLM dump for this session — dumper added 2026-06-19, only newer sessions have it">no raw I/O</button>`;
+
+    const sumBands = (sumByAfter[tn.index] || [])
+      .map(({ ev, idx }) => renderSummarizationBandHtml(ev, idx))
+      .join('');
+
+    return `<div class="turn ${esc(tn.classification)}">
+      <div class="head">
+        <span class="idx">Turn ${tn.index}</span>
+        <span class="class-badge">${esc(tn.classification)}</span>
+        ${tn.started_at ? `<span>${esc(tn.started_at.slice(11, 23))}</span>` : ''}
+        <span class="v2v" title="voice-to-voice: time from user stops speaking to bot starts speaking">${fmtMs(tn.voice_to_voice_ms)}</span>
+      </div>
+      ${tn.student_text ? `<div class="utterance student"><span class="speaker">STUDENT</span><span class="text">${esc(tn.student_text)}</span></div>` : ''}
+      ${tn.bot_text ? `<div class="utterance bot"><span class="speaker">EXAMINER</span><span class="text">${esc(tn.bot_text)}</span></div>` : ''}
+      ${events.length ? `<div class="events">${events.join('')}</div>` : ''}
+      ${rawToggle}
+    </div>${sumBands}`;
+  }).join('');
+
+  // Wire toggle buttons (event delegation would be cleaner; this is fine for a
+  // dashboard re-rendered per session click).
+  container.querySelectorAll('.raw-toggle[data-turn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = btn.getAttribute('data-turn');
+      const panel = document.getElementById(`raw-${idx}`);
+      if (!panel) return;
+      const isOpen = panel.classList.toggle('open');
+      btn.textContent = isOpen ? 'hide raw LLM I/O' : 'show raw LLM I/O';
+      // re-append count badge
+      const cnt = panel.querySelectorAll('.raw-call').length;
+      const span = document.createElement('span');
+      span.className = 'count';
+      span.textContent = cnt;
+      btn.appendChild(span);
+    });
+  });
+
+  // Wire summarization bands — click header to toggle the body.
+  container.querySelectorAll('.sum-band').forEach(band => {
+    const head = band.querySelector('.sb-head');
+    if (!head) return;
+    head.addEventListener('click', (e) => {
+      // Don't fire when clicking a copy button inside an expanded body.
+      if (e.target.closest('.rb-copy')) return;
+      band.classList.toggle('open');
+    });
+  });
+
+  // Wire copy buttons inside raw panels.
+  container.querySelectorAll('.rb-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      // If data-copy attribute is present, copy from there (used by the
+      // messages-blocks panel where the raw JSON isn't on screen as <pre>).
+      // Otherwise fall back to the sibling <pre>'s text.
+      let payload = btn.getAttribute('data-copy');
+      if (!payload) {
+        const pre = btn.closest('.raw-block')?.querySelector('pre');
+        if (pre) payload = pre.textContent || '';
+      }
+      if (payload == null) return;
+      try {
+        await navigator.clipboard.writeText(payload);
+        const orig = btn.textContent;
+        btn.textContent = 'copied';
+        setTimeout(() => { btn.textContent = orig; }, 1200);
+      } catch (e) {
+        btn.textContent = 'copy failed';
+      }
+    });
+  });
+
+}
+
+// Render a list of raw LLM call records (the per-turn JSONL entries) into
+// the inline expander panel. Each call shows: system prompt, message list,
+// tool definitions (collapsed to JSON), and the raw output text + tool_calls.
+// The header also carries a role badge (function-routing vs speech) and
+// the prompt/completion token counts when available.
+function renderRawCallsHtml(calls) {
+  if (!calls || !calls.length) {
+    return '<div class="no-data">No raw calls recorded for this turn.</div>';
+  }
+  const n = calls.length;
+  return calls.map((rec, i) => {
+    const input = rec.input || {};
+    const output = rec.output || {};
+    const system = input.system || '';
+    const messages = input.messages || [];
+    const tools = input.tools || [];
+    const outText = output.text || '';
+    const toolCalls = output.tool_calls || [];
+    const usage = rec.usage || null;
+
+    // Classify role: with >=2 calls in a turn, the LAST one is the
+    // speech-producing call and the earlier ones are function-routing.
+    const isFunction = (n >= 2 && i < n - 1) || (toolCalls.length > 0 && !outText);
+    const role = isFunction ? 'function' : 'speech';
+    const roleLabel = isFunction ? 'function-routing' : 'speech';
+
+    const tokenBadge = usage
+      ? `<span class="rc-tokens"><strong>${usage.prompt_tokens ?? '?'}</strong> in → <strong>${usage.completion_tokens ?? '?'}</strong> out${usage.cache_read_input_tokens ? ` · ${usage.cache_read_input_tokens} cached` : ''}</span>`
+      : `<span class="rc-tokens" title="no token usage captured for this call">tokens —</span>`;
+
+    const blocks = [];
+    if (system) {
+      blocks.push(`<div class="raw-block input system">
+        <div class="rb-head">system prompt<button class="rb-copy">copy</button></div>
+        <pre>${esc(system)}</pre>
+      </div>`);
+    }
+    blocks.push(`<div class="raw-block input">
+      <div class="rb-head">messages (${messages.length})<button class="rb-copy" data-copy='${esc(JSON.stringify(messages, null, 2))}'>copy raw json</button></div>
+      <div class="msg-blocks">${renderMessageBlocksHtml(messages)}</div>
+    </div>`);
+    if (tools && tools.length) {
+      blocks.push(`<div class="raw-block tools">
+        <div class="rb-head">tools (${tools.length})<button class="rb-copy">copy</button></div>
+        <pre>${esc(JSON.stringify(tools, null, 2))}</pre>
+      </div>`);
+    }
+    if (outText) {
+      blocks.push(`<div class="raw-block output">
+        <div class="rb-head">output text<button class="rb-copy">copy</button></div>
+        <pre>${esc(outText)}</pre>
+      </div>`);
+    }
+    if (toolCalls && toolCalls.length) {
+      blocks.push(`<div class="raw-block output">
+        <div class="rb-head">tool_calls (${toolCalls.length})<button class="rb-copy">copy</button></div>
+        <pre>${esc(JSON.stringify(toolCalls, null, 2))}</pre>
+      </div>`);
+    }
+    if (!outText && !toolCalls.length) {
+      blocks.push(`<div class="raw-block output">
+        <div class="rb-head">output</div>
+        <pre style="color:var(--muted);font-style:italic">(no text or tool calls captured)</pre>
+      </div>`);
+    }
+
+    return `<div class="raw-call role-${role}">
+      <div class="rc-head">
+        <span class="rc-idx">Call ${i + 1} of ${n}</span>
+        <span class="rc-role">${esc(roleLabel)}</span>
+        <span>${esc((rec.ts || '').slice(11, 23))}</span>
+        <span class="rc-model">${esc(rec.model || rec.service || '')}</span>
+        ${tokenBadge}
+      </div>
+      ${blocks.join('')}
+    </div>`;
+  }).join('');
+}
+
+// Classify a single message from the LLM input.messages list into a
+// human-readable block kind, and return its body text or JSON for display.
+//
+// Heuristics (deterministic, no LLM):
+//   - has function_call / tool_use part        → 'tool-call'
+//   - has function_response part               → 'tool-result'
+//   - is the result of an async_tool function  → 'tool-result' (text-wrapped)
+//   - role='model'/'assistant' + text          → 'bot-said'
+//   - role='user' + matches persona preamble   → 'persona'
+//   - role='user' + matches node-prompt preamble (multi-step / "You just heard") → 'node-prompt'
+//   - role='user' + short text                 → 'student'
+//   - role='user' + long text (>500 chars)     → 'node-prompt' (fallback for less-obvious prompts)
+//   - otherwise                                → 'other'
+function classifyMessage(msg) {
+  if (!msg || typeof msg !== 'object') return { kind: 'other', body: '', extra: null };
+
+  // Normalize: pipecat sometimes uses {role, parts:[{text/function_call/function_response}]} (Gemini)
+  // and other times {role, content: "..."} (OpenAI/Anthropic).
+  const role = msg.role || '';
+  let texts = [];
+  let functionCall = null;
+  let functionResponse = null;
+  let thought = false;
+
+  if (Array.isArray(msg.parts)) {
+    for (const p of msg.parts) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.function_call) functionCall = p.function_call;
+      if (p.function_response) functionResponse = p.function_response;
+      if (p.thought_signature) thought = true;
+      if (p.text) texts.push(p.text);
+    }
+  } else if (typeof msg.content === 'string') {
+    texts.push(msg.content);
+  } else if (Array.isArray(msg.content)) {
+    for (const c of msg.content) {
+      if (typeof c === 'string') texts.push(c);
+      else if (c && typeof c === 'object') {
+        if (c.text) texts.push(c.text);
+        if (c.type === 'tool_use') functionCall = { name: c.name, args: c.input, id: c.id };
+        if (c.type === 'tool_result') functionResponse = c;
+      }
+    }
+  }
+
+  const text = texts.join('\n').trim();
+
+  // tool_call wins
+  if (functionCall) {
+    return {
+      kind: 'tool-call',
+      body: `${functionCall.name || functionCall.function_name || 'tool'}(${JSON.stringify(functionCall.args || functionCall.arguments || {}, null, 2)})`,
+      extra: { id: functionCall.id, raw: functionCall },
+    };
+  }
+  if (functionResponse) {
+    let pretty;
+    try {
+      const resp = functionResponse.response || functionResponse;
+      pretty = `${functionResponse.name || 'tool'} → ${JSON.stringify(resp, null, 2)}`;
+    } catch {
+      pretty = JSON.stringify(functionResponse, null, 2);
+    }
+    return { kind: 'tool-result', body: pretty, extra: { raw: functionResponse } };
+  }
+
+  // Some messages are tool-result wrappers shipped as plain text (Gemini async_tool path).
+  if (role === 'user' && text.startsWith('{') && /async_tool/.test(text)) {
+    return { kind: 'tool-result', body: text, extra: null };
+  }
+
+  // role=model with text → bot's prior speech turn
+  if (role === 'model' || role === 'assistant') {
+    return { kind: 'bot-said', body: text || '(no text)', extra: { thought } };
+  }
+
+  // role=user: classify by length + content cues
+  if (role === 'user') {
+    // Persona detector — matches the SYSTEM_PROMPT preamble verbatim-ish.
+    if (/^You are a warm, encouraging oral examiner/i.test(text)
+        || /STRICT RULES — never break these/i.test(text)) {
+      return { kind: 'persona', body: text, extra: null };
+    }
+    // Node-prompt detector — task_messages tend to start with these patterns.
+    if (/^STEP \d/i.test(text)
+        || /^You just heard/i.test(text)
+        || /^OFF-TOPIC TRACKER/i.test(text)
+        || /^META CHECK/i.test(text)
+        || /\bcall (assess_|advance_|begin_|record_|off_topic_)/i.test(text)) {
+      return { kind: 'node-prompt', body: text, extra: null };
+    }
+    // Long-but-unrecognised → probably a node prompt
+    if (text.length > 400) return { kind: 'node-prompt', body: text, extra: null };
+    // Short → student utterance
+    return { kind: 'student', body: text || '(no text)', extra: null };
+  }
+
+  return { kind: 'other', body: text || JSON.stringify(msg).slice(0, 400), extra: null };
+}
+
+const KIND_LABEL = {
+  persona: 'persona / global rules',
+  'node-prompt': 'node prompt',
+  'bot-said': 'bot said',
+  student: 'student said',
+  'tool-call': 'llm emitted tool call',
+  'tool-result': 'tool result',
+  thought: 'thought trace',
+  other: 'other',
+};
+
+const TRUNC_AT = 240;   // chars
+
+function approxTokens(s) {
+  // Rough heuristic: 1 token ≈ 4 chars. Good enough for display badges.
+  if (!s) return 0;
+  return Math.max(1, Math.round(s.length / 4));
+}
+
+function renderMessageBlocksHtml(messages) {
+  if (!Array.isArray(messages) || !messages.length) {
+    return '<div style="color:var(--muted);font-size:11px;font-style:italic">no messages</div>';
+  }
+  return messages.map((msg, i) => {
+    const { kind, body } = classifyMessage(msg);
+    const tokens = approxTokens(body);
+    const label = KIND_LABEL[kind] || kind;
+
+    return `<div class="msg-block ${esc(kind)}">
+      <div class="mb-head">
+        <span class="mb-idx">#${i}</span>
+        <span class="mb-kind">${esc(label)}</span>
+        <span class="mb-len">~${tokens} tok</span>
+      </div>
+      <div class="mb-body">${esc(body)}</div>
+    </div>`;
+  }).join('');
+}
+
+// Render a summarization event as a clickable band shown BETWEEN two turns.
+// Clicking expands the band to show full input messages + output summary text.
+function renderSummarizationBandHtml(ev, idx) {
+  const inp = ev.input || {};
+  const out = ev.output || {};
+  const msgCount = (inp.messages || []).length;
+  const summaryText = out.text || '';
+  const summaryLen = summaryText.length;
+  const errorCls = ev.error ? 'error' : '';
+  const summaryWords = summaryText ? summaryText.trim().split(/\s+/).length : 0;
+
+  return `<div class="sum-band ${errorCls}" data-sumidx="${idx}">
+    <div class="sb-head">
+      <span class="sb-tag">summarization</span>
+      <span class="sb-stats">compressed ${msgCount} messages → ${summaryWords} words${ev.error ? ' · FAILED' : ''}</span>
+      <span class="sb-time">${esc((ev.ts || '').slice(11, 23))} · ${esc(ev.model || '?')}</span>
+    </div>
+    <div class="sb-body">
+      ${ev.error ? `<div class="raw-block output"><div class="rb-head" style="color:var(--bad)">error</div><pre>${esc(ev.error)}</pre></div>` : ''}
+      ${inp.system ? `<div class="raw-block input system">
+        <div class="rb-head">summarization prompt<button class="rb-copy">copy</button></div>
+        <pre>${esc(inp.system)}</pre>
+      </div>` : ''}
+      <div class="raw-block input">
+        <div class="rb-head">messages being summarized (${msgCount})<button class="rb-copy">copy</button></div>
+        <pre>${esc(JSON.stringify(inp.messages || [], null, 2))}</pre>
+      </div>
+      ${summaryText ? `<div class="raw-block output">
+        <div class="rb-head">summary output (${summaryLen} chars)<button class="rb-copy">copy</button></div>
+        <pre>${esc(summaryText)}</pre>
+      </div>` : ''}
+      <div class="sb-hint">Click the band header to collapse.</div>
+    </div>
+  </div>`;
+}
+
+// ─── utils ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+}
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`;
+}
+
+$('search').addEventListener('input', e => filterSessions(e.target.value));
+loadSessions();
+</script>
+
+</body>
+</html>

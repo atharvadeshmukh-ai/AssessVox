@@ -178,8 +178,15 @@ class AssessVoxGoogleLLMService(GoogleLLMService):
             await super().stop_ttfb_metrics(end_time=end_time)
 
     async def push_frame(self, frame, direction=None):
-        from pipecat.frames.frames import LLMTextFrame
-        if not self._ttft_armed and isinstance(frame, LLMTextFrame) and frame.text:
+        # Arm TTFB on the first real output — either a text token (normal
+        # speech response) or a function call (tool-use response). Without
+        # the FunctionCallInProgressFrame arm, tool-use calls produce no
+        # LLMTextFrame so _ttft_armed stays False and the entire Gemini
+        # thinking time (sometimes 7s+) is silently swallowed from metrics.
+        if not self._ttft_armed and (
+            (isinstance(frame, LLMTextFrame) and frame.text)
+            or isinstance(frame, FunctionCallInProgressFrame)
+        ):
             self._ttft_armed = True
         if direction is not None:
             await super().push_frame(frame, direction)
@@ -3514,7 +3521,31 @@ async def run_bot(
     ])
 
     metrics_logger = MetricsLogObserver()
-    latency_observer = UserBotLatencyObserver(enable_metrics=True)
+
+    class _Ink2LatencyObserver(UserBotLatencyObserver):
+        """UserBotLatencyObserver that works with CartesiaTurnsSTTService.
+
+        The stock observer starts timing on VADUserStoppedSpeakingFrame.
+        With ExternalUserTurnStrategies + Ink-2, Silero is disabled so that
+        frame never fires. This subclass falls back to UserStoppedSpeakingFrame
+        as the start trigger when no VAD frame has set _user_stopped_time yet.
+        """
+
+        async def on_push_frame(self, data):
+            # If Ink-2 emits UserStoppedSpeakingFrame and _user_stopped_time
+            # hasn't been set by a prior VAD frame, record it now so the
+            # parent class can complete the latency measurement.
+            from pipecat.frames.frames import UserStoppedSpeakingFrame as _USF
+            if (
+                isinstance(data.frame, _USF)
+                and not isinstance(data.frame, VADUserStoppedSpeakingFrame)
+                and self._user_stopped_time is None
+            ):
+                self._user_stopped_time = time.time()
+                self._user_turn_start_time = self._user_stopped_time
+            await super().on_push_frame(data)
+
+    latency_observer = _Ink2LatencyObserver(enable_metrics=True)
 
     @latency_observer.event_handler("on_latency_measured")
     async def on_latency_measured(observer, latency_seconds):

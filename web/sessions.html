@@ -711,6 +711,9 @@ function renderTurns(t) {
       events.push(`<div class="ev node"><div class="tag">→ node</div><div class="body">${esc(node)}</div></div>`);
     }
     for (const llm of tn.llm_calls) {
+      // Skip 0ms startup artifacts (pipeline init emits a zero-TTFB metric
+      // for every service before any real call fires).
+      if (llm.ttfb_ms === 0) continue;
       const cls = llm.role === 'function' ? 'llm-function' : 'llm-speech';
       const tag = llm.role === 'function' ? 'LLM call (fn)' : 'LLM call';
       events.push(`<div class="ev ${cls}"><div class="tag">${tag}</div><div class="body">${esc(llm.service)}${llm.model ? ' · ' + esc(llm.model) : ''}</div><div class="ms">${llm.ttfb_ms}ms</div></div>`);
@@ -756,10 +759,22 @@ function renderTurns(t) {
       </div>`);
     }
     const rawCount = (tn.raw_calls || []).length;
+    // Sum tokens across all calls for this turn.
+    const totalIn  = (tn.raw_calls || []).reduce((s, c) => s + ((c.usage||{}).prompt_tokens     || 0), 0);
+    const totalOut = (tn.raw_calls || []).reduce((s, c) => s + ((c.usage||{}).completion_tokens || 0), 0);
+    const tokenBadgeInline = (totalIn || totalOut)
+      ? `<span style="margin-left:10px;font-size:10px;color:var(--muted-2);letter-spacing:0.5px;">`
+        + `<strong style="color:var(--text)">${totalIn}</strong> in`
+        + ` → <strong style="color:var(--text)">${totalOut}</strong> out`
+        + `</span>`
+      : '';
     const rawToggle = rawCount > 0
-      ? `<button class="raw-toggle" data-turn="${tn.index}">show raw LLM I/O<span class="count">${rawCount}</span></button>
-         <div class="raw-panel" id="raw-${tn.index}">${renderRawCallsHtml(tn.raw_calls)}</div>`
-      : `<button class="raw-toggle" disabled title="No raw LLM dump for this session — dumper added 2026-06-19, only newer sessions have it">no raw I/O</button>`;
+      ? `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:10px;">`
+        + `<button class="raw-toggle" data-turn="${tn.index}" style="margin-top:0">show raw LLM I/O<span class="count">${rawCount}</span></button>`
+        + tokenBadgeInline
+        + `</div>`
+        + `<div class="raw-panel" id="raw-${tn.index}">${renderRawCallsHtml(tn.raw_calls)}</div>`
+      : `<div style="margin-top:10px;"><button class="raw-toggle" disabled title="No raw LLM dump for this session — dumper added 2026-06-19, only newer sessions have it">no raw I/O</button></div>`;
 
     const sumBands = (sumByAfter[tn.index] || [])
       .map(({ ev, idx }) => renderSummarizationBandHtml(ev, idx))
@@ -853,11 +868,15 @@ function renderRawCallsHtml(calls) {
     const toolCalls = output.tool_calls || [];
     const usage = rec.usage || null;
 
-    // Classify role: with >=2 calls in a turn, the LAST one is the
-    // speech-producing call and the earlier ones are function-routing.
-    const isFunction = (n >= 2 && i < n - 1) || (toolCalls.length > 0 && !outText);
+    // Classify role:
+    // - 2+ calls: earlier ones are function-routing, last is speech
+    // - 1 call with tool_calls: single-shot routing+speak (our optimisation)
+    // - 1 call with text only: pure speech
+    const isMultiCall = n >= 2;
+    const isFunction = (isMultiCall && i < n - 1) || (!isMultiCall && toolCalls.length > 0 && !outText);
+    const isSingleShotRouting = !isMultiCall && toolCalls.length > 0;
     const role = isFunction ? 'function' : 'speech';
-    const roleLabel = isFunction ? 'function-routing' : 'speech';
+    const roleLabel = isSingleShotRouting ? 'single-call (routes + speaks)' : isFunction ? 'function-routing' : 'speech';
 
     const tokenBadge = usage
       ? `<span class="rc-tokens"><strong>${usage.prompt_tokens ?? '?'}</strong> in → <strong>${usage.completion_tokens ?? '?'}</strong> out${usage.cache_read_input_tokens ? ` · ${usage.cache_read_input_tokens} cached` : ''}</span>`

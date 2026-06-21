@@ -393,9 +393,11 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
     for idx, (secs, ts, parts) in enumerate(breakdowns):
         stt_ms, tts_ms, _ = _parse_breakdown(parts)
         # All LLM TTFBs falling in (prior_secs, secs] belong to this turn.
+        # Exclude the 0ms startup artifact that pipecat emits when the pipeline
+        # first initialises every service — these are not real LLM calls.
         bracket_llms = [
             (ts_, svc, model, ms) for (ts_secs, ts_, svc, model, ms) in scan["ttfbs"]
-            if "LLM" in svc and prior_secs < ts_secs <= secs
+            if "LLM" in svc and prior_secs < ts_secs <= secs and ms > 0
         ]
         # function calls + node transitions in the same bracket
         bracket_fns = [fn for (ts_secs, _, fn) in scan["function_calls"] if prior_secs < ts_secs <= secs]
@@ -482,7 +484,12 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
         #    AssessVoxGoogleLLMService).
         # - slack-hit if SmartTurn stop_secs cap fired.
         # - otherwise single-call.
-        if len(llm_events) >= 2 or len(bracket_fns) > 0:
+        # Turn 0 (greeting) has a node transition at startup — not a real
+        # two-call routing turn. Only classify as two-call on turns where
+        # the student actually spoke (student_text is set) or where ≥2 real
+        # LLM calls fired. The startup node-set on Turn 0 is a false positive.
+        _has_real_fn_call = len(bracket_fns) > 0 and (student_text is not None or len(llm_events) >= 2)
+        if len(llm_events) >= 2 or _has_real_fn_call:
             classification = "two-call"
         elif bracket_slacks:
             classification = "slack-hit"

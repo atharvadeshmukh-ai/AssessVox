@@ -132,7 +132,7 @@ async def get_session_timeline(session_id: str):
 # Models that don't follow our long multi-step system prompts well enough.
 # Repeatedly observed in logs: 3-attempt-cap rule ignored, autocompletion of
 # student fragments, phantom function calls. Coerced to gemini-3.5-flash.
-_LLM_MODEL_BLOCKLIST = frozenset({"gemini-3.1-flash-lite"})
+_LLM_MODEL_BLOCKLIST = frozenset()  # gemini-3.1-flash-lite re-enabled for testing
 _LLM_MODEL_FALLBACK = "gemini-3.5-flash"
 
 

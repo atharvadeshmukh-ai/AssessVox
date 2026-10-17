@@ -36,6 +36,11 @@ Generate a FlowSpec JSON with EXACTLY these fields:
 
 Rules:
 - exam_question must be opinion-based and open-ended (not factual)
+- exam_question must be SHORT and SINGLE-FOCUS: ONE question, at most ~25 words,
+  one sentence. Do NOT bundle multiple questions, and do NOT append extra
+  instructions like "be ready to defend...", "engage with... too", or
+  "consider both X and Y" — those belong in the probes, not the opening
+  question. The student should hear one clear, answerable question.
 - Include 5-7 probes in probe_pool covering different angles of the topic
 - required_probes: exactly 2 probe IDs that MUST be covered in every session
 - precision probe type must appear exactly once and should be last in the pool

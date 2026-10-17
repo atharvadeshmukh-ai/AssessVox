@@ -21,15 +21,42 @@ import asyncio
 import json
 import logging
 import os
+import ssl as _ssl
 import sys
 from pathlib import Path
 from typing import Annotated
 
+# ── Fast TLS: memoise the SSL context ────────────────────────────────────────
+# On this Windows / Python 3.14 box, ssl.create_default_context() loads the
+# certifi CA bundle in 3-8 SECONDS. google-genai rebuilds that context on every
+# Gemini Live (re)connection, and each rebuild FREEZES the agent event loop for
+# seconds — which lags the conversation AND trips the WebSocket heartbeat,
+# causing more drops, more reconnects, more rebuilds (we saw 28 of them, up to
+# 7.7s each). Memoise so the context is built at most once per arg-set and
+# reused instantly on every reconnect.
+_SSL_CTX_CACHE: dict = {}
+_orig_create_default_context = _ssl.create_default_context
+
+
+def _memoised_create_default_context(purpose=_ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+    key = (purpose, cafile, capath, cadata if isinstance(cadata, (str, bytes, type(None))) else id(cadata))
+    ctx = _SSL_CTX_CACHE.get(key)
+    if ctx is None:
+        ctx = _orig_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
+        _SSL_CTX_CACHE[key] = ctx
+    return ctx
+
+
+_ssl.create_default_context = _memoised_create_default_context
+
 from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import AgentSession, Agent, JobContext, llm, room_io
+from livekit.agents.voice.agent_session import VoiceActivityVideoSampler
 from livekit.rtc.room import ConnectError
 from livekit.plugins import google, silero
+from livekit.agents.utils.images import EncodeOptions, ResizeOptions
+from google.genai import types as genai_types
 
 sys.path.insert(0, str(Path(__file__).parent))
 from prompts import INTERVIEW_INSTRUCTIONS, build_exam_instructions
@@ -39,6 +66,21 @@ load_dotenv(Path(__file__).parent / ".env.local")
 
 logger = logging.getLogger("assessvox-video-agent")
 logger.setLevel(logging.INFO)
+
+
+def _media_resolution():
+    """Resolve GEMINI_LIVE_MEDIA_RESOLUTION (LOW/MEDIUM/HIGH) to the enum.
+
+    HIGH reads fine detail (handwriting, diagrams) but makes Gemini do more work
+    per frame, which delays its audio replies. MEDIUM is the balanced default —
+    still far clearer than Gemini's low default, without the audio lag.
+    """
+    name = os.getenv("GEMINI_LIVE_MEDIA_RESOLUTION", "MEDIUM").upper()
+    return {
+        "LOW": genai_types.MediaResolution.MEDIA_RESOLUTION_LOW,
+        "MEDIUM": genai_types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+        "HIGH": genai_types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+    }.get(name, genai_types.MediaResolution.MEDIA_RESOLUTION_MEDIUM)
 
 
 class ExamAgent(Agent):
@@ -55,9 +97,28 @@ class ExamAgent(Agent):
             instructions=instructions,
             llm=google.realtime.RealtimeModel(
                 model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
-                voice=os.getenv("GEMINI_LIVE_VOICE", "Puck"),
+                # Female examiner voice. Gemini Live female voices: Aoede, Kore,
+                # Leda, Zephyr (male: Puck, Charon, Fenrir, Orus). Override with
+                # GEMINI_LIVE_VOICE in .env.
+                voice=os.getenv("GEMINI_LIVE_VOICE", "Aoede"),
                 temperature=0.6,
                 api_key=os.getenv("GEMINI_API_KEY"),
+                # Visual detail vs audio latency trade-off (see _media_resolution).
+                # MEDIUM by default; set GEMINI_LIVE_MEDIA_RESOLUTION=HIGH to read
+                # finer detail at the cost of slower replies.
+                media_resolution=_media_resolution(),
+                # Encode each video frame at 512px, not the 1024px default. JPEG
+                # encoding runs synchronously on the audio event loop; at 1024px
+                # each frame blocked it ~200ms (the voice broke). 512px is ~4x
+                # cheaper (under the block threshold) and still readable.
+                image_encode_options=EncodeOptions(
+                    resize_options=ResizeOptions(
+                        width=int(os.getenv("GEMINI_LIVE_IMG_SIZE", "512")),
+                        height=int(os.getenv("GEMINI_LIVE_IMG_SIZE", "512")),
+                        strategy="scale_aspect_fit",
+                    ),
+                    quality=75,
+                ),
             ),
         )
         self._spec = spec or {}
@@ -209,6 +270,26 @@ class ExamAgent(Agent):
 
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
+    # Warm heavy, synchronous work off the hot path. Done lazily on the first
+    # turn these each block the agent event loop for seconds (SSL context ~4s,
+    # PIL ~1s), delaying the examiner's audio and the first video frame.
+    try:
+        # Build + cache the SSL context now (memoised at import). google-genai
+        # reuses it on every Gemini reconnect instead of rebuilding (3-8s each).
+        _ssl.create_default_context()
+        try:
+            import certifi
+            _ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+        import PIL.Image
+        PIL.Image.preinit()
+        # Warm numpy.fft — the transcription speaking-rate step runs an FFT on
+        # the event loop; the first import alone stalled it ~0.5s.
+        import numpy as _np
+        _np.fft.rfft(_np.zeros(8))
+    except Exception:
+        pass
 
 
 async def entrypoint(ctx: JobContext):
@@ -245,17 +326,54 @@ async def entrypoint(ctx: JobContext):
     if vad is None:
         vad = silero.VAD.load()
 
-    session = AgentSession(vad=vad)
+    # Keep the model's view of the camera CURRENT. The default sampler sends
+    # video at 1 fps while speaking and only 0.3 fps while silent (a frame every
+    # ~3s), so when the student silently holds up work the model reacts to a
+    # frame from seconds ago ("I can see the page" after it's gone). Sample
+    # faster — especially while silent, since students show work without talking.
+    # Each sampled frame is JPEG-encoded synchronously on the audio event loop,
+    # so higher fps = more audio stutter. 1.5/1.0 keeps the view fresh (vs the
+    # 1.0/0.3 default) without starving audio. Tune via the env vars.
+    # Keep fps modest: every sampled frame is resized+encoded on the audio loop.
+    # Combined with the small camera resolution (480x360 from the browser) and
+    # 512px encode, this keeps the per-frame cost under the block threshold.
+    video_sampler = VoiceActivityVideoSampler(
+        speaking_fps=float(os.getenv("GEMINI_LIVE_SPEAKING_FPS", "1.0")),
+        silent_fps=float(os.getenv("GEMINI_LIVE_SILENT_FPS", "0.5")),
+    )
+    session = AgentSession(vad=vad, video_sampler=video_sampler)
     agent = ExamAgent(spec=spec, ctx=ctx)
 
     await session.start(
         room=ctx.room,
         agent=agent,
-        room_options=room_io.RoomOptions(
-            video_input=True,
-            audio_input=True,
-            audio_output=True,
+        # Split input/output options (NOT the unified room_options) so that
+        # sync_transcription=False is actually honored. The unified form ignored
+        # it, leaving the transcript synchronizer's speaking-rate FFT running on
+        # the audio event loop (~1-1.7s freezes → the voice breaks). We only need
+        # the transcript text, not millisecond audio alignment.
+        room_input_options=room_io.RoomInputOptions(
+            video_enabled=True,
+            audio_enabled=True,
         ),
+        room_output_options=room_io.RoomOutputOptions(
+            audio_enabled=True,
+            transcription_enabled=True,
+            sync_transcription=False,
+        ),
+    )
+
+    # The examiner opens the conversation. Gemini Live otherwise waits silently
+    # for the student to speak first, so neither side talks and the exam never
+    # starts ("conversation not being established"). Trigger an opening turn.
+    await session.generate_reply(
+        instructions=(
+            "Greet the student warmly by name, say you can see them on camera, "
+            "briefly restate the exam task in one sentence, and invite them to "
+            "begin. Say this ONCE, in two or three sentences, then stop and wait "
+            "for their response. Do NOT repeat yourself or re-ask. Do NOT claim "
+            "to see any diagram, apparatus, or work yet — they haven't shown it."
+        )
     )
 
 

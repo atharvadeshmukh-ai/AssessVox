@@ -66,6 +66,7 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesAppendFrame,
     LLMMessagesUpdateFrame,
     LLMTextFrame,
     MetricsFrame,
@@ -420,12 +421,17 @@ class FallbackCartesiaTTSService(CartesiaTTSService):
     only advances, never resets.
     """
 
-    def __init__(self, *, api_keys: list[str], voice_id: str, **kwargs):
+    def __init__(self, *, api_keys: list[str], voice_id: str, model: str | None = None, **kwargs):
         if not api_keys:
             raise ValueError("FallbackCartesiaTTSService needs at least one api_key")
+        settings = (
+            CartesiaTTSService.Settings(voice=voice_id, model=model)
+            if model
+            else CartesiaTTSService.Settings(voice=voice_id)
+        )
         super().__init__(
             api_key=api_keys[0],
-            settings=CartesiaTTSService.Settings(voice=voice_id),
+            settings=settings,
             **kwargs,
         )
         self._api_keys: list[str] = list(api_keys)
@@ -969,6 +975,19 @@ class MarkerStripFilter(FrameProcessor):
             if marker_found and not (frame.text or "").strip():
                 return
 
+            # Strip markdown emphasis/code characters the LLM sometimes emits
+            # despite the "no markdown" instruction (*bold*, **word**, `code`).
+            # These are never spoken and surface as stray '*' in the transcript
+            # and TTS. Removing the bare characters is safe for a voice feed.
+            cur = frame.text if marker_found else text
+            if "*" in cur or "`" in cur:
+                cleaned = cur.replace("*", "").replace("`", "")
+                frame.text = cleaned
+                # If the frame was ONLY markdown chars (e.g. "**"), drop it so
+                # TTS doesn't get an empty/odd fragment.
+                if cur.strip() and not cleaned.strip():
+                    return
+
         await self.push_frame(frame, direction)
 
 
@@ -1085,7 +1104,21 @@ SYSTEM_PROMPT = (
     "15. THINKING ALOUD: if the student speaks in short fragments across multiple "
     "    utterances, they are thinking aloud. Do NOT interrupt to demand depth. "
     "    Let them finish the thought. You may quietly say 'take your time' once "
-    "    if there is a long pause, but otherwise wait."
+    "    if there is a long pause, but otherwise wait. "
+    "16. PLAIN, STUDENT-FRIENDLY LANGUAGE — mandatory: these students are 11–16 and "
+    "    many are not native English speakers. Speak in simple, everyday words and "
+    "    SHORT sentences. Avoid academic jargon, complex or rare vocabulary, idioms, "
+    "    and long multi-clause sentences. Ask ONE clear thing at a time. If a "
+    "    subject term is unavoidable, explain it in a few plain words right after. "
+    "    Aim for language a 12-year-old can follow easily on first hearing — if a "
+    "    simpler word works, always use it. If a student seems confused by your "
+    "    wording, rephrase it even more simply. "
+    "17. STOPPING ON REQUEST — mandatory: if the student clearly asks to STOP or "
+    "    FINISH the whole exam (e.g. 'I want to stop', 'can we end now', 'I'm "
+    "    done', 'I'm finished', 'that's all I have', 'I don't want to continue', "
+    "    'end the exam'), speak ONE short warm closing line and call end_exam "
+    "    right away. Respect their wish — do NOT argue, bargain, or ask them to "
+    "    continue. (Only skipping one question = advance_from_probe, not end_exam.)"
 )
 ROLE_MESSAGES = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -1292,6 +1325,21 @@ async def handle_global_off_topic(
     return ({"next_action": "wait_for_student"}, None)
 
 
+async def handle_student_end_request(
+    args: FlowArgs, flow_manager: FlowManager
+) -> tuple[dict, NodeConfig | None]:
+    """Student explicitly asked to STOP / FINISH the whole exam → close it.
+
+    Transitions straight to the closing node, which thanks the student warmly
+    and ends the conversation (which triggers grading). This is distinct from
+    advance_from_probe, which only skips the current question.
+    """
+    name = flow_manager.state.get("name", "")
+    logger.info(f"Student requested to end the exam (name={name!r}); closing.")
+    flow_manager.state.update({"ended_by_student": True})
+    return ({"status": "exam_ended_by_student"}, create_closing_node(flow_manager))
+
+
 # ─── Cancel node ───────────────────────────────────────────────────────────────
 
 def create_cancel_exam_node(flow_manager: FlowManager) -> NodeConfig:
@@ -1427,10 +1475,17 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
                 "asked a question / expressed nervousness.\n\n"
                 "Do NOT ask for the student's name; you already have it.\n\n"
                 f"SPEAK FIELD — mandatory:\n"
-                "For 'ready': ONE flowing statement — warm acknowledgement (3-5 words) "
-                "immediately followed by the exam question verbatim. No pause between "
-                "the two. Example: 'Wonderful! Here is our question for today: [question]'\n"
-                f"THE EXAM QUESTION IS (use verbatim): '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'\n"
+                "For 'ready': ONE SHORT flowing statement — warm acknowledgement "
+                "(3-5 words) + the central question only, in a single clear "
+                "sentence. KEEP IT SMALL. If the question text below is long or "
+                "bundles several asks or instructions (e.g. 'be ready to "
+                "defend...', 'engage with... too', 'consider both X and Y', "
+                "'choose 3 objects and...'), do NOT read the whole paragraph — "
+                "pose ONLY the core question now; the other parts come up "
+                "naturally as follow-ups. Never deliver a big paragraph or "
+                "multiple questions at once. "
+                "Example: 'Wonderful! Here's our question: [the one core question]'\n"
+                f"THE EXAM QUESTION (shorten to its core if long): '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'\n"
                 "For 'not_ready': a gentle reassurance."
             ),
         }],
@@ -1492,12 +1547,16 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
                 "same reply, pass it as corrected_name. Otherwise leave "
                 "corrected_name empty and we'll ask them to spell it.\n\n"
                 "SPEAK FIELD — mandatory:\n"
-                "For 'confirmed': write ONE flowing statement that (a) warmly "
-                "acknowledges the confirmed name in 3-5 words, then (b) immediately "
-                "poses the exam question word for word. No pause between the two — "
-                "they should feel like one natural sentence. Example structure: "
-                "'Wonderful, [name]! Here is our question for today: [exam question]' "
-                f"THE EXAM QUESTION IS (use it verbatim): '{exam_question}'\n"
+                "For 'confirmed': write ONE SHORT flowing statement that (a) warmly "
+                "acknowledges the confirmed name in 3-5 words, then (b) poses only "
+                "the CORE question in a single clear sentence. KEEP IT SMALL. If "
+                "the question text below is long or bundles several asks (e.g. "
+                "'be ready to defend...', 'engage with... too', 'choose 3 objects "
+                "and...'), do NOT read the whole paragraph — pose only the core "
+                "question now; other parts come up as follow-ups. Never deliver a "
+                "big paragraph or multiple questions at once. Example: "
+                "'Wonderful, [name]! Here's our question: [the one core question]' "
+                f"THE EXAM QUESTION (shorten to its core if long): '{exam_question}'\n"
                 "For 'corrected' with a new name: confirm the new name warmly. "
                 "For 'corrected' without a name: ask them to spell it."
             ),
@@ -1524,9 +1583,11 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
                         "type": "string",
                         "description": (
                             "The exact text to speak aloud right now. "
-                            "For confirmed: ONE flowing statement — warm acknowledgement "
-                            "(3-5 words) immediately followed by the exam question "
-                            "verbatim, e.g. 'Wonderful! Here is our question: [question]'. "
+                            "For confirmed: ONE SHORT statement — warm acknowledgement "
+                            "(3-5 words) + only the CORE question in one clear sentence "
+                            "(if the question is long or bundles several asks, pose only "
+                            "its central question, not the whole paragraph), e.g. "
+                            "'Wonderful! Here's our question: [the one core question]'. "
                             "For corrected with new name: warm confirmation of the "
                             "new name. For corrected without name: ask them to spell."
                         ),
@@ -1917,6 +1978,13 @@ VOLUNTARY_SKIP_LIMIT = 2  # Beyond this, treat further skips as struggle, not vo
 PROBE_ATTEMPT_CAP = 3     # Matches _ATTEMPT_CAP_RULE in flow_primitives.
 REVISIT_LIMIT = 2         # How many times we'll loop back to covered probes if time remains.
 
+# ─── Idle / no-response escalation ──────────────────────────────────────────
+# When the student goes silent after the examiner speaks, escalate instead of
+# hanging forever: strike 1 nudges ("are you there?"), strike 2 moves to the
+# next question, strike 3 thanks and ends (which triggers grading). The timer
+# is the per-silence window and only runs after the bot finishes speaking.
+IDLE_TIMEOUT_SECS = float(os.getenv("EXAM_IDLE_TIMEOUT_SECS", "15"))
+
 
 def _pick_revisit_probe(flow_manager: FlowManager) -> str | None:
     """Pick the covered probe with the lowest attempt count — the one that
@@ -1973,6 +2041,14 @@ async def _flush_transcript(flow_manager: FlowManager) -> None:
 async def handle_transition(
     args: FlowArgs, flow_manager: FlowManager
 ) -> tuple[dict, NodeConfig]:
+    # Reset the no-response strike counter: the student engaged enough to
+    # advance. Skip the reset when THIS advance was itself triggered by the
+    # idle escalation (strike 2), so a continued silence still escalates to end.
+    if flow_manager.state.pop("idle_advance_pending", False):
+        pass
+    else:
+        flow_manager.state.update({"idle_strikes": 0})
+
     current = flow_manager.state.get("current_probe", "opening")
     covered = set(flow_manager.state.get("covered_probes", []))
     covered.add(current)
@@ -2509,6 +2585,47 @@ Return ONLY valid JSON:
 """
 
 
+def _grade_call_with_retry(fn, *, attempts: int = 4, what: str = "grading"):
+    """Run a Gemini grading call (generate_content / file upload) with retries
+    on transient network failures.
+
+    The grading request occasionally dies mid-flight with a connection reset
+    (WinError 10054 / httpx.ReadError) — a flaky hop to Google, not a real error.
+    google-genai's own retry doesn't cover read-resets, so one blip failed the
+    whole report. We retry transient network/5xx errors with backoff, but NOT
+    4xx (bad key, quota, malformed request), which won't improve on retry.
+    """
+    import time as _time
+    try:
+        import httpx
+        _net_errs = (httpx.TransportError, ConnectionError, TimeoutError)
+    except Exception:
+        _net_errs = (ConnectionError, TimeoutError)
+    _transient_markers = (
+        "10054", "forcibly closed", "connection reset", "connection aborted",
+        "timed out", "timeout", "temporarily", "unavailable", "503", "502", "500",
+        "remotedisconnected", "server disconnected",
+    )
+    last_exc = None
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — classify below, re-raise non-transient
+            msg = str(e).lower()
+            is_transient = isinstance(e, _net_errs) or any(m in msg for m in _transient_markers)
+            if not is_transient:
+                raise
+            last_exc = e
+            if i < attempts:
+                wait = 2 ** (i - 1)  # 1s, 2s, 4s
+                logger.warning(
+                    f"{what}: transient network error (attempt {i}/{attempts}): "
+                    f"{type(e).__name__}: {str(e)[:120]}; retrying in {wait}s"
+                )
+                _time.sleep(wait)
+    raise last_exc
+
+
 def _grade_exam_video_sync(
     video_path: Path,
     metadata: dict,
@@ -2524,7 +2641,8 @@ def _grade_exam_video_sync(
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     logger.info(f"Uploading {video_path.name} to Gemini Files API…")
-    video_file = client.files.upload(file=str(video_path))
+    video_file = _grade_call_with_retry(
+        lambda: client.files.upload(file=str(video_path)), what="video upload")
 
     waited = 0.0
     while getattr(video_file, "state", None) and video_file.state.name == "PROCESSING":
@@ -2554,14 +2672,14 @@ def _grade_exam_video_sync(
             dimension_guide=VIDEO_DIMENSION_GUIDE,
         )
 
-    response = client.models.generate_content(
+    response = _grade_call_with_retry(lambda: client.models.generate_content(
         model=VIDEO_GRADER_MODEL,
         contents=[prompt, video_file],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             max_output_tokens=12288,
         ),
-    )
+    ), what="video grading")
     text = (response.text or "{}").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -2681,7 +2799,7 @@ def _grade_exam_sync(
             dimension_guide=DIMENSION_GUIDE,
         )
 
-    response = client.models.generate_content(
+    response = _grade_call_with_retry(lambda: client.models.generate_content(
         model=GRADER_MODEL,
         contents=[
             prompt,
@@ -2691,7 +2809,7 @@ def _grade_exam_sync(
             response_mime_type="application/json",
             max_output_tokens=8192,   # 7-dim report can be long; default cap truncates
         ),
-    )
+    ), what="audio grading")
     text = (response.text or "{}").strip()
 
     # Defensive: some models wrap JSON in ```json ... ``` despite the mime hint.
@@ -2891,11 +3009,20 @@ def _build_stt(
         # ExternalUserTurnStrategies lets those external frames control turn flow.
         # This eliminates the mid-thought fragmentation that caused 3-6 LLM calls
         # per turn when students paused between phrases.
-        logger.info("STT provider: cartesia / ink-2 (turns v2) | native semantic endpointing")
+        # Keyterm boosting: bias recognition toward this exam's domain vocabulary
+        # (topic terms + student/character names) so words like "elitist" aren't
+        # misheard as "elite test". ink-2 supports the same keyterm prompting as
+        # Deepgram nova-3; without it, rare/academic words get phonetic lookalikes.
+        kt = keyterms or []
+        logger.info(
+            f"STT provider: cartesia / ink-2 (turns v2) | native semantic "
+            f"endpointing | keyterms={len(kt)} ({kt[:8]}{'…' if len(kt) > 8 else ''})"
+        )
         return CartesiaTurnsSTTService(
             api_key=os.getenv("CARTESIA_API_KEY"),
             settings=CartesiaTurnsSTTService.Settings(
                 language=lang_code or "en",
+                keyterm=kt or None,
             ),
         )
 
@@ -3042,9 +3169,10 @@ _STT_STOPWORDS: set[str] = {
 
 def _extract_keyterms_from_flowspec(flow_spec: FlowSpec | None, limit: int = 100) -> list[str]:
     """Pull domain vocabulary from the exam's FlowSpec to bias STT models
-    that support keyterm-prompting (Deepgram nova-3). For ElevenLabs and
-    Cartesia we currently don't pass keyterms — Cartesia's API doesn't expose
-    them, and ElevenLabs's keyterm field has a small documented benefit."""
+    that support keyterm-prompting. Deepgram nova-3 AND Cartesia ink-2 both
+    accept a keyterm list (ink-2 via CartesiaTurnsSTTService.Settings.keyterm),
+    so academic/topic words aren't misheard as phonetic lookalikes (e.g.
+    'elitist' -> 'elite test')."""
     if not flow_spec:
         return []
     pool: set[str] = set()
@@ -3067,7 +3195,7 @@ async def run_bot(
     runner_args: RunnerArguments,
     session_id: str,
     llm_provider: str = "google",
-    llm_model: str = "gemini-3.5-flash",
+    llm_model: str = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash"),
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
@@ -3098,15 +3226,17 @@ async def run_bot(
         raise RuntimeError(
             "No Cartesia API key configured — set CARTESIA_API_KEY in .env"
         )
+    cartesia_tts_model = os.getenv("CARTESIA_TTS_MODEL", "sonic-3.6")
     logger.info(
         f"Cartesia TTS configured with {len(cartesia_keys)} key(s): "
         f"primary={FallbackCartesiaTTSService._mask(cartesia_keys[0])}"
         + (f", fallbacks={[FallbackCartesiaTTSService._mask(k) for k in cartesia_keys[1:]]}" if len(cartesia_keys) > 1 else " (no fallbacks)")
-        + f" | voice={tts_voice}"
+        + f" | voice={tts_voice} | model={cartesia_tts_model}"
     )
     tts = FallbackCartesiaTTSService(
         api_keys=cartesia_keys,
         voice_id=tts_voice,
+        model=cartesia_tts_model,
     )
 
     # LLM call dumper: write every round-trip's input+output to
@@ -3465,6 +3595,10 @@ async def run_bot(
                 incomplete_short_timeout=12.0,   # ↑ from 5 — mid-sentence pause
                 incomplete_long_timeout=25.0,    # ↑ from 10 — "let me think"
             ),
+            # Fire on_user_turn_idle after this many seconds of student silence
+            # following the examiner's turn. Drives the no-response escalation
+            # (nudge → next question → end), so a gap can never run forever.
+            user_idle_timeout=IDLE_TIMEOUT_SECS,
         ),
         assistant_params=LLMAssistantAggregatorParams(
             enable_auto_context_summarization=enable_auto_summarization,
@@ -3587,7 +3721,25 @@ async def run_bot(
                 ),
                 properties={},
                 required=[],
-            )
+            ),
+            FlowsFunctionSchema(
+                name="end_exam",
+                handler=handle_student_end_request,
+                description=(
+                    "Call IMMEDIATELY when the student clearly asks to STOP or "
+                    "FINISH the WHOLE exam — e.g. 'I want to stop', 'can we stop', "
+                    "'can we end now', 'I'm done', 'I am finished', 'let's finish', "
+                    "'that's all I have', 'I don't want to continue', 'end the "
+                    "exam', 'I want to leave'. This ENDS the session and starts "
+                    "grading. Before calling, speak ONE short warm closing line "
+                    "(e.g. 'Of course — thank you for your thoughts today.'). "
+                    "Do NOT call this when the student only wants to skip the "
+                    "current question or move to the next one — that is "
+                    "advance_from_probe, not end_exam."
+                ),
+                properties={},
+                required=[],
+            ),
         ],
     )
     attempt_counter.attach(flow_manager)
@@ -3685,6 +3837,71 @@ async def run_bot(
             "User turn stop-timeout fired (turn opened but no final transcript)"
         )
 
+    # No-response escalation: fires after IDLE_TIMEOUT_SECS of student silence
+    # once the examiner has finished speaking. Escalates across consecutive
+    # silences so an unanswered question never hangs forever.
+    #   strike 1 → nudge "are you still there?"
+    #   strike 2 → acknowledge + move to the next question
+    #   strike 3 → thank, close the exam (→ grading starts)
+    # The counter resets when the student actually answers (handle_transition).
+    @context_aggregator.user().event_handler("on_user_turn_idle")
+    async def on_user_turn_idle(aggregator):
+        strikes = int(flow_manager.state.get("idle_strikes", 0)) + 1
+        flow_manager.state.update({"idle_strikes": strikes})
+        name = (flow_manager.state.get("name") or "there").strip() or "there"
+        node = flow_manager.current_node or ""
+        logger.info(f"Student idle — strike {strikes}/3 (node={node!r})")
+
+        # Already closing/cancelling — let it finish, don't nag.
+        if node in ("closing", "cancelled"):
+            return
+
+        try:
+            if strikes == 1:
+                await flow_manager.task.queue_frame(TTSSpeakFrame(
+                    f"Are you still there, {name}? Take your time — "
+                    "just let me know when you're ready."
+                ))
+            elif strikes == 2:
+                # During greeting / name-capture there is no advance_from_probe
+                # function registered yet, so injecting a call to it makes the
+                # model reply "I don't have that function." Just nudge again
+                # (strike 3 will end the session) until the exam proper begins.
+                _PRE_EXAM_NODES = {"greeting", "greeting_known_name",
+                                   "confirm_name", "spell_name"}
+                if node in _PRE_EXAM_NODES:
+                    await flow_manager.task.queue_frame(TTSSpeakFrame(
+                        f"{name}, are you there? Whenever you're ready, just say "
+                        "so and we'll begin."
+                    ))
+                else:
+                    # Idle-driven advance: flag it so handle_transition does NOT
+                    # reset the strike counter (this isn't a real answer), letting
+                    # continued silence escalate to the end on the next timeout.
+                    flow_manager.state.update({"idle_advance_pending": True})
+                    await flow_manager.task.queue_frame(TTSSpeakFrame(
+                        f"No problem, {name} — let's move on to the next question."
+                    ))
+                    await flow_manager.task.queue_frame(LLMMessagesAppendFrame(
+                        messages=[{"role": "system", "content": (
+                            "[SILENCE] The student did not respond to the previous "
+                            "question. Call advance_from_probe now with "
+                            "student_struggling=true and "
+                            "student_consented_to_advance=true, then ask the next "
+                            "question in one short sentence."
+                        )}],
+                        run_llm=True,
+                    ))
+            else:
+                # strike >= 3: thank and end → grading.
+                flow_manager.state.update({"ended_idle": True})
+                logger.info("Ending exam: student unresponsive after 3 prompts")
+                await flow_manager.set_node_from_config(
+                    create_closing_node(flow_manager)
+                )
+        except Exception:
+            logger.exception("idle-escalation handler failed")
+
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     try:
         await runner.run(task)
@@ -3729,7 +3946,7 @@ async def run_session(
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
     llm_provider: str = "google",
-    llm_model: str = "gemini-3.5-flash",
+    llm_model: str = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash"),
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",

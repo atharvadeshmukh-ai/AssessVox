@@ -624,6 +624,7 @@
   let pc = null;
   let audioEl = null;
   let micStream = null;
+  let iceGraceTimer = null;   // grace timer for transient ICE 'disconnected' blips
   let reportPoller = null;
   let audioCtx = null;
   let analyser = null;
@@ -1043,7 +1044,39 @@
           document.body.appendChild(el);
         }
       });
-      const tracks = await createLocalTracks({ audio: true, video: true });
+
+      // Live transcript — render examiner + student turns under the orb so the
+      // conversation is visible (parity with voice mode).
+      const videoTurns = [];
+      renderTranscript._lastSig = undefined;
+      livekitRoom.on('transcriptionReceived', (segments, participant) => {
+        const speaker = (participant && participant.isLocal) ? 'STUDENT' : 'EXAMINER';
+        let added = false;
+        for (const seg of segments) {
+          if (!seg.final) continue;
+          const text = (seg.text || '').trim();
+          if (!text) continue;
+          const last = videoTurns[videoTurns.length - 1];
+          if (last && last.speaker === speaker) last.text += ' ' + text;
+          else videoTurns.push({ speaker, text });
+          added = true;
+        }
+        if (added) { setLogLive(true); renderTranscript(videoTurns); }
+      });
+
+      // Echo cancellation is essential: without it the student's mic re-captures
+      // the examiner's audio, which the model hears itself say → it repeats and
+      // talks over itself. Video stays unconstrained so camera capture can never
+      // fail (an exact resolution can throw OverconstrainedError and block join).
+      // Publish a SMALL camera resolution. The agent resizes every frame with
+      // PIL on its audio event loop; the cost scales with input pixels, and
+      // full-res (720p) frames froze the audio ~200-300ms each. 480x360 is ~8x
+      // fewer pixels → cheap resize → smooth audio. "ideal" (not exact) so the
+      // camera never throws OverconstrainedError and blocks the join.
+      const tracks = await createLocalTracks({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: { width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 15 } },
+      });
       localTracks = tracks.map(t => t.mediaStreamTrack);   // keep refs for cleanup
       await livekitRoom.connect(sessionData.livekit_url, sessionData.livekit_token);
       for (const track of tracks) {
@@ -1054,6 +1087,27 @@
       }
       $('video-status').textContent = 'live';
       setStatus('Video session live', 'live');
+      setLive(true);
+      setOrbState('listening');
+
+      // Drive the IDLE/LISTENING/TALKING orb from the examiner's state. Voice
+      // mode gets this from RTVI events; the video (LiveKit) path had nothing
+      // wired, so the orb was stuck on idle the whole session. Two signals:
+      //   · lk.agent.state attribute (listening / thinking / speaking) — precise
+      //   · activeSpeakersChanged — reliable fallback (is the examiner audible?)
+      livekitRoom.on('participantAttributesChanged', (changed, participant) => {
+        if (!participant || participant.isLocal) return;
+        const st = changed && changed['lk.agent.state'];
+        if (st === 'speaking') { setOrbState('talking'); setThinking(false); }
+        else if (st === 'thinking' || st === 'initializing') { setOrbState('listening'); setThinking(true); }
+        else if (st === 'listening') { setOrbState('listening'); setThinking(false); }
+      });
+      livekitRoom.on('activeSpeakersChanged', (speakers) => {
+        const examinerTalking = speakers.some(p => p && !p.isLocal);
+        setOrbState(examinerTalking ? 'talking' : 'listening');
+        if (examinerTalking) setThinking(false);
+      });
+
       // Start MediaRecorder
       const stream = new MediaStream(tracks.map(t => t.mediaStreamTrack));
       const mimeType = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
@@ -1078,6 +1132,9 @@
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     // Stop camera — LED off, tile replaced with grading overlay.
     _stopCameraAndShowGrading();
+    setOrbState('idle');
+    setLive(false);
+    setThinking(true);
     $('call-btn').classList.remove('live');
     $('call-btn').disabled = true;
     $('call-btn-label').textContent = 'Grading…';
@@ -1224,6 +1281,8 @@
       pc.oniceconnectionstatechange = () => {
         const s = pc.iceConnectionState;
         if (s === 'connected' || s === 'completed') {
+          // Recovered — cancel any pending "reconnecting" grace timer.
+          if (iceGraceTimer) { clearTimeout(iceGraceTimer); iceGraceTimer = null; }
           setStatus('Live', 'live');
           setLive(true);
           setOrbState('talking');
@@ -1235,7 +1294,24 @@
           $('call-btn').disabled = false;
           $('call-btn').title = 'End exam';
           startLivePolling();
-        } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+        } else if (s === 'disconnected') {
+          // 'disconnected' is usually a TRANSIENT blip (brief wifi/network hiccup)
+          // that ICE recovers from on its own within a few seconds. Don't end the
+          // exam instantly — wait a grace window; only end if it doesn't recover.
+          setStatus('Reconnecting…');
+          setThinking(true);
+          if (!iceGraceTimer) {
+            iceGraceTimer = setTimeout(() => {
+              iceGraceTimer = null;
+              const st = pc && pc.iceConnectionState;
+              if (st === 'disconnected' || st === 'failed' || st === 'closed') {
+                handleDisconnect();
+              }
+            }, 7000);
+          }
+        } else if (s === 'failed' || s === 'closed') {
+          // Terminal — end now.
+          if (iceGraceTimer) { clearTimeout(iceGraceTimer); iceGraceTimer = null; }
           handleDisconnect();
         }
       };
@@ -1352,10 +1428,16 @@
         const report = await r.json();
         clearInterval(reportPoller); reportPoller = null;
         if (transcriptPoller) { clearInterval(transcriptPoller); transcriptPoller = null; }
+        // Grading is done — reset the button out of the greyed "Grading…" state
+        // so the student knows the report is ready (and can start a new exam).
+        $('call-btn').disabled = false;
+        $('call-btn').classList.remove('live');
+        $('call-btn').classList.add('ready');
+        $('call-btn-label').textContent = 'Start Exam';
         renderReport(report);
         renderTranscript(report.transcript || []);
         setStatus('Report ready', 'live');
-        $('hint-text').textContent = 'Exam complete';
+        $('hint-text').textContent = 'Exam complete — report ready';
         setThinking(false);
         setLogLive(false);
       }
@@ -1374,10 +1456,13 @@
     const sig = turns.length + ':' + (turns[turns.length - 1]?.text || '').slice(-40);
     if (sig === renderTranscript._lastSig) return;
     renderTranscript._lastSig = sig;
+    // Strip stray markdown (*, **, `) the model sometimes emits — never meant
+    // to be shown in a spoken-exam transcript.
+    const clean = (s) => (s || '').replace(/[*`]/g, '');
     const html = turns.map(t => `
       <div class="turn">
         <div class="who ${t.speaker.toLowerCase()}">${esc(t.speaker)}</div>
-        <div class="what">${esc(t.text)}</div>
+        <div class="what">${esc(clean(t.text))}</div>
       </div>
     `).join('');
     const log = $('log');

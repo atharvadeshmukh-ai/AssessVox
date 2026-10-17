@@ -387,7 +387,11 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
     bot_turns = [t for t in transcript_data.get("turns", []) if t.get("speaker") == "EXAMINER"]
 
     breakdowns = scan["breakdowns"]
-    v2v_by_ts = {ts: ms for (_, ts, ms) in scan["v2vs"]}
+    # voice-to-voice and breakdown are logged as two separate events that fire
+    # back-to-back from the same handler, so their timestamps differ by 1–2ms.
+    # Match by nearest timestamp within a tolerance rather than exact string
+    # equality (which silently drops every v2v when the ms digit differs).
+    v2v_events = sorted(scan["v2vs"])  # (secs, ts, ms)
 
     prior_secs = 0.0
     for idx, (secs, ts, parts) in enumerate(breakdowns):
@@ -476,7 +480,15 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
         if not bot_text:
             bot_text = bot_turns[idx]["text"] if idx < len(bot_turns) else None
 
-        v2v_ms = v2v_by_ts.get(ts)
+        # Pair this turn's breakdown with the closest v2v event (within 0.5s).
+        # Turns are seconds/minutes apart, so a 0.5s window can only ever match
+        # the v2v line emitted alongside this same breakdown. The greeting turn
+        # has no preceding student speech and correctly stays None.
+        v2v_ms = None
+        if v2v_events:
+            near_secs, _, near_ms = min(v2v_events, key=lambda e: abs(e[0] - secs))
+            if abs(near_secs - secs) <= 0.5:
+                v2v_ms = near_ms
         # Classification rules:
         # - two-call if there were >=2 LLM TTFB events OR a function call fired
         #   (covers the Gemini case where TTFB metric is deferred and the

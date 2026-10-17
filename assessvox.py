@@ -135,6 +135,14 @@ async def get_session_timeline(session_id: str):
 _LLM_MODEL_BLOCKLIST = frozenset()  # gemini-3.1-flash-lite re-enabled for testing
 _LLM_MODEL_FALLBACK = "gemini-3.5-flash"
 
+# Default conversation LLM. gemini-3.5-flash is accurate but slow (~4.4s TTFB /
+# ~2.6s per call), which produces audible dead air mid-turn — the examiner
+# pauses between sentences and around function-routing (two-call) turns, so the
+# voice "breaks" in the middle of a response. A faster tier closes those gaps.
+# Override in .env with GEMINI_CONVERSATION_MODEL (e.g. back to gemini-3.5-flash
+# if exam-flow adherence regresses).
+DEFAULT_LLM_MODEL = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash")
+
 
 def _coerce_llm_model(provider: str, model: str) -> str:
     if (provider or "").lower() == "google" and model in _LLM_MODEL_BLOCKLIST:
@@ -241,7 +249,7 @@ class CreateSessionRequest(BaseModel):
     question_id: str | None = None
     # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude), "cerebras" (GPT-OSS 120B, free tier)
     llm_provider: str = "google"
-    llm_model: str = "gemini-3.5-flash"
+    llm_model: str = DEFAULT_LLM_MODEL
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
     # no Whisper hallucinations), "cartesia-ink-2" (May 2026 ink-2 — #1 on
     # streaming STT leaderboards, built-in turn detection, English-only),
@@ -548,7 +556,12 @@ async def _create_livekit_room(room_name: str, exam_spec: dict) -> None:
         await lk.room.create_room(CreateRoomRequest(
             name=room_name,
             metadata=json.dumps(exam_spec),
-            empty_timeout=300,
+            # Persist the room (and its exam-spec metadata) for an hour. At the
+            # old 300s, if the student generated a flow and didn't Start Exam
+            # within 5 min, LiveKit garbage-collected the empty room; joining
+            # later auto-recreated it WITHOUT metadata, so the agent fell back to
+            # the generic "which assessment?" prompt instead of running the exam.
+            empty_timeout=3600,
             max_participants=4,
         ))
     finally:
@@ -659,11 +672,35 @@ async def grade_video_session(session_id: str, background_tasks: BackgroundTasks
 _LK_WORKER_PROC: "subprocess.Popen | None" = None
 
 
+def _kill_stale_livekit_workers() -> None:
+    """Kill any leftover agent.py workers from a previous run before spawning.
+
+    Each stale worker stays registered with LiveKit Cloud and can be dispatched
+    the next video session — running old code or with detached output — so a new
+    exam silently goes to the wrong worker. Killing them first guarantees only
+    the current build serves video rooms.
+    """
+    try:
+        import psutil
+    except Exception:
+        return
+    me = os.getpid()
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = p.info.get("cmdline") or []
+            if p.pid != me and any("agent.py" in str(c) for c in cmdline):
+                p.kill()
+                logger.info(f"Killed stale LiveKit worker pid={p.pid}")
+        except Exception:
+            pass
+
+
 def _spawn_livekit_worker() -> None:
     global _LK_WORKER_PROC
     if os.getenv("ASSESSVOX_DISABLE_LK_WORKER", "").strip() in ("1", "true", "yes"):
         logger.info("ASSESSVOX_DISABLE_LK_WORKER set; skipping worker spawn")
         return
+    _kill_stale_livekit_workers()
     if not (os.getenv("LIVEKIT_URL") and os.getenv("LIVEKIT_API_KEY")
             and os.getenv("LIVEKIT_API_SECRET")):
         logger.warning("LiveKit credentials missing — video sessions will have no examiner agent.")
@@ -702,13 +739,39 @@ import atexit
 atexit.register(_shutdown_livekit_worker)
 
 
+_WORKER_WATCHDOG_TASK: "asyncio.Task | None" = None
+
+
+async def _worker_watchdog() -> None:
+    """Respawn the LiveKit worker if it dies.
+
+    The worker gives up and exits after ~16 failed connection attempts (e.g. a
+    transient DNS/network blip reaching LiveKit Cloud). Without this, one hiccup
+    silently takes video mode down until the whole server is restarted — the
+    examiner simply never joins the room and never speaks.
+    """
+    while True:
+        await asyncio.sleep(15)
+        proc = _LK_WORKER_PROC
+        if proc is not None and proc.poll() is not None:
+            logger.warning(
+                f"LiveKit worker (pid={proc.pid}) exited (code={proc.returncode}); "
+                "respawning so video sessions keep working"
+            )
+            _spawn_livekit_worker()
+
+
 @app.on_event("startup")
 async def _on_startup() -> None:
+    global _WORKER_WATCHDOG_TASK
     _spawn_livekit_worker()
+    _WORKER_WATCHDOG_TASK = asyncio.create_task(_worker_watchdog())
 
 
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
+    if _WORKER_WATCHDOG_TASK is not None:
+        _WORKER_WATCHDOG_TASK.cancel()
     _shutdown_livekit_worker()
 
 
@@ -811,7 +874,7 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             custom_grading_prompt=s.get("custom_grading_prompt"),
             student_name=s.get("student_name"),
             llm_provider=s.get("llm_provider", "google"),
-            llm_model=s.get("llm_model", "gemini-3.5-flash"),
+            llm_model=s.get("llm_model", DEFAULT_LLM_MODEL),
             stt_provider=s.get("stt_provider", "cartesia-ink-2"),
             stt_language=s.get("stt_language", "en"),
             tts_voice=s.get("tts_voice", "e07c00bc-4134-4eae-9ea4-1a55fb45746b"),

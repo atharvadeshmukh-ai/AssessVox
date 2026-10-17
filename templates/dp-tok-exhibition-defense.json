@@ -76,7 +76,7 @@
       "id": "prompt-types-of-knowledge",
       "label": "IA #15 — Open to interpretation",
       "theme": "Knowledge Frameworks",
-      "prompt": "Your prompt is: \"Are some types of knowledge less open to interpretation than others?\" Choose 3 objects spanning at least 2 Areas of Knowledge and defend why each connects.",
+      "prompt": "\"Are some types of knowledge less open to interpretation than others?\" Choose 3 objects spanning at least 2 Areas of Knowledge and defend why each connects.",
       "image_url": null,
       "notes": "Strong AoK contrast question — Natural Sciences vs Arts."
     },
@@ -84,7 +84,7 @@
       "id": "prompt-new-knowledge-changes-values",
       "label": "IA #24 — New knowledge changes values",
       "theme": "Knowledge and Ethics",
-      "prompt": "Your prompt is: \"Can new knowledge change established values or beliefs?\" Choose 3 objects that illustrate cases where this happened — or didn't. Be ready to defend each connection.",
+      "prompt": "\"Can new knowledge change established values or beliefs?\" Choose 3 objects that illustrate cases where this happened — or didn't. Be ready to defend each connection.",
       "image_url": null,
       "notes": "Lets students bring strong contemporary examples (e.g. germ theory, climate, AI)."
     },
@@ -92,7 +92,7 @@
       "id": "prompt-imagination-and-knowledge",
       "label": "IA #28 — Imagination's role in knowledge",
       "theme": "Producing Knowledge",
-      "prompt": "Your prompt is: \"What role does imagination play in producing knowledge about the world?\" Choose 3 objects that show imagination at work in knowledge-making — across science, arts, or everyday reasoning.",
+      "prompt": "\"What role does imagination play in producing knowledge about the world?\" Choose 3 objects that show imagination at work in knowledge-making — across science, arts, or everyday reasoning.",
       "image_url": null,
       "notes": "Bridges science and arts; great for breaking AoK silos."
     },
@@ -100,7 +100,7 @@
       "id": "prompt-who-owns-knowledge",
       "label": "IA #32 — Who owns knowledge",
       "theme": "Knowledge and Society",
-      "prompt": "Your prompt is: \"Who owns knowledge?\" Choose 3 objects that surface the question of ownership — IP, indigenous knowledge, scientific commons, etc. Be ready to defend each.",
+      "prompt": "\"Who owns knowledge?\" Choose 3 objects that surface the question of ownership — IP, indigenous knowledge, scientific commons, etc. Be ready to defend each.",
       "image_url": null,
       "notes": "Politically charged — students can engage with patents, vaccine equity, AI training data."
     },
@@ -108,7 +108,7 @@
       "id": "prompt-bias-inevitable",
       "label": "IA #11 — Is bias inevitable",
       "theme": "Producing Knowledge",
-      "prompt": "Your prompt is: \"Is bias inevitable in the production of knowledge?\" Choose 3 objects showing how bias operates in knowledge-making — and possibly one showing how it can be countered.",
+      "prompt": "\"Is bias inevitable in the production of knowledge?\" Choose 3 objects showing how bias operates in knowledge-making — and possibly one showing how it can be countered.",
       "image_url": null,
       "notes": "Tests methodological awareness across AoKs."
     },
@@ -116,7 +116,7 @@
       "id": "prompt-expectations-shape-knowing",
       "label": "IA #22 — Expectations affect what we know",
       "theme": "Producing Knowledge",
-      "prompt": "Your prompt is: \"How do our expectations affect what we know?\" Choose 3 objects that illustrate confirmation bias, framing effects, paradigm shifts, or other cases where what we expected shaped what we found.",
+      "prompt": "\"How do our expectations affect what we know?\" Choose 3 objects that illustrate confirmation bias, framing effects, paradigm shifts, or other cases where what we expected shaped what we found.",
       "image_url": null,
       "notes": "Strong psychology / philosophy of science territory."
     },
@@ -124,7 +124,7 @@
       "id": "prompt-evidence-vs-conviction",
       "label": "IA #20 — Evidence vs conviction",
       "theme": "Knowledge and Ethics",
-      "prompt": "Your prompt is: \"What counts as good evidence for a claim?\" Choose 3 objects exemplifying very different evidentiary standards — courtroom, lab, news, lived experience — and defend each.",
+      "prompt": "\"What counts as good evidence for a claim?\" Choose 3 objects exemplifying very different evidentiary standards — courtroom, lab, news, lived experience — and defend each.",
       "image_url": null,
       "notes": "AoK comparison built in; pushes epistemological precision."
     },
@@ -132,7 +132,7 @@
       "id": "prompt-tradition-and-knowledge",
       "label": "IA #6 — Replacing old knowledge",
       "theme": "Knowledge and Society",
-      "prompt": "Your prompt is: \"How does the way we organise or classify knowledge affect what we know?\" Choose 3 objects showing how a classification system shaped — or distorted — knowledge.",
+      "prompt": "\"How does the way we organise or classify knowledge affect what we know?\" Choose 3 objects showing how a classification system shaped — or distorted — knowledge.",
       "image_url": null,
       "notes": "Good for students drawn to history of science / library science / data."
     },
@@ -140,7 +140,7 @@
       "id": "prompt-knowledge-with-no-application",
       "label": "IA #33 — Pure vs applied knowledge",
       "theme": "Knowledge and Society",
-      "prompt": "Your prompt is: \"Is there knowledge that a person or group has a responsibility to acquire — or NOT to acquire?\" Choose 3 objects that span both directions of this question.",
+      "prompt": "\"Is there knowledge that a person or group has a responsibility to acquire — or NOT to acquire?\" Choose 3 objects that span both directions of this question.",
       "image_url": null,
       "notes": "Ethics-heavy; strong AoK contrast (e.g. nuclear physics, medical ethics, indigenous knowledge)."
     },
@@ -148,7 +148,7 @@
       "id": "prompt-acquired-vs-shared",
       "label": "IA #4 — Personal vs shared knowledge",
       "theme": "Knowledge Frameworks",
-      "prompt": "Your prompt is: \"Why do we seek knowledge?\" Choose 3 objects showing different motivations for seeking knowledge — curiosity, survival, status, ethics — and defend.",
+      "prompt": "\"Why do we seek knowledge?\" Choose 3 objects showing different motivations for seeking knowledge — curiosity, survival, status, ethics — and defend.",
       "image_url": null,
       "notes": "Open question — gives students broad creative latitude."
     },
@@ -156,7 +156,7 @@
       "id": "prompt-what-counts-as-good-explanation",
       "label": "IA #14 — Good explanations",
       "theme": "Producing Knowledge",
-      "prompt": "Your prompt is: \"What counts as a good justification for a claim?\" Choose 3 objects where the strength of justification differs — across scientific argument, legal proof, mathematical proof, or testimony.",
+      "prompt": "\"What counts as a good justification for a claim?\" Choose 3 objects where the strength of justification differs — across scientific argument, legal proof, mathematical proof, or testimony.",
       "image_url": null,
       "notes": "Tests AoK methodology fluency."
     },
@@ -164,7 +164,7 @@
       "id": "prompt-experts-and-knowledge",
       "label": "IA #26 — Trust in expertise",
       "theme": "Knowledge and Society",
-      "prompt": "Your prompt is: \"Does it matter who produces knowledge?\" Choose 3 objects that illustrate how the identity / position / interests of the producer affect the knowledge produced — across science, history, journalism.",
+      "prompt": "\"Does it matter who produces knowledge?\" Choose 3 objects that illustrate how the identity / position / interests of the producer affect the knowledge produced — across science, history, journalism.",
       "image_url": null,
       "notes": "Politically alive; great for current-events resonance."
     }

@@ -11,6 +11,9 @@ dependencies = [
     "pipecatcloud>=0.2.4",
     "livekit>=0.14.0",
     "livekit-api>=0.7.0",
+    "livekit-agents>=1.8.6",
+    "livekit-plugins-google>=1.7.0",
+    "livekit-plugins-silero>=1.8.6",
 ]
 
 [dependency-groups]

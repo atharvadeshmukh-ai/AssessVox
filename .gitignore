@@ -215,7 +215,8 @@ llm_calls/
 .DS_Store
 
 # Local AI tool state
-.claude/
+.claude/*
+!.claude/skills/
 
 # Stray pip artifact + the bundled cloudflared binary (download separately)
 =*

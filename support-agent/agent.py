@@ -142,6 +142,11 @@ class ExamAgent(Agent):
 
         # Mutable exam state
         self._student_name: str = (spec or {}).get("student_name", "") or "the student"
+        # Keep the base instructions so we can re-issue them with the student's
+        # name appended once it's known (see record_student_name). Gemini Live
+        # does not reliably remember a name captured via a tool-call result, so
+        # we pin it into the system instructions instead.
+        self._base_instructions: str = instructions
         self._probes_covered: list[str] = []
         self._required_probes: set[str] = set((spec or {}).get("required_probes") or [])
         self._off_topic_strikes: int = 0
@@ -160,6 +165,20 @@ class ExamAgent(Agent):
         """
         self._student_name = name.strip().title()
         logger.info(f"Student name recorded: {self._student_name!r}")
+        # Pin the name into the live system instructions. Relying on the model to
+        # remember a tool-call result is flaky on Gemini Live — we saw it record
+        # a name and then, a turn later, claim "I don't have your name yet." The
+        # plugin supports mutable instructions, so this makes the name durable.
+        try:
+            await self.update_instructions(
+                f"{self._base_instructions}\n\n"
+                f"# STUDENT NAME — CONFIRMED\n"
+                f"The student's name is {self._student_name}. You DO know their "
+                f"name. Address them as {self._student_name} where natural, and "
+                f"NEVER say you don't know or don't have their name."
+            )
+        except Exception as e:
+            logger.warning(f"Could not pin student name into instructions: {e}")
         return f"Name recorded: {self._student_name}"
 
     # ─── Tool 2: advance probe ────────────────────────────────────────────────

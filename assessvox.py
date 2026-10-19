@@ -93,15 +93,20 @@ app.add_middleware(
 )
 
 
+# Never let the browser cache the app shell — otherwise UI changes (new
+# dropdowns, options) silently don't appear until a manual cache clear.
+_NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+
 @app.get("/", include_in_schema=False)
 async def root():
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers=_NO_CACHE)
 
 
 @app.get("/sessions", include_in_schema=False)
 async def sessions_page():
     """Session-inspector dashboard."""
-    return FileResponse(WEB_DIR / "sessions.html")
+    return FileResponse(WEB_DIR / "sessions.html", headers=_NO_CACHE)
 
 
 if WEB_DIR.exists():

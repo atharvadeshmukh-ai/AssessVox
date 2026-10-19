@@ -127,11 +127,22 @@ class ExamAgent(Agent):
             llm=google.realtime.RealtimeModel(
                 model=live_model,
                 # Female examiner voice. Gemini Live female voices: Aoede, Kore,
-                # Leda, Zephyr (male: Puck, Charon, Fenrir, Orus). Override with
-                # GEMINI_LIVE_VOICE in .env.
+                # Leda, Zephyr (male: Puck — THE DEFAULT when unspecified —
+                # Charon, Fenrir, Orus). Override with GEMINI_LIVE_VOICE in .env.
                 voice=os.getenv("GEMINI_LIVE_VOICE", "Aoede"),
                 temperature=0.6,
                 api_key=os.getenv("GEMINI_API_KEY"),
+                # Keep ONE long-lived Gemini session. Without these, a long exam
+                # hits the session's token/duration limit, Gemini sends GoAway,
+                # and a NEW session starts — the moment the voice can drift from
+                # the female Aoede to Gemini's male default (Puck). A sliding
+                # context window keeps the session from filling up, and session
+                # resumption makes any unavoidable reconnect restore the SAME
+                # session (same voice) instead of starting fresh.
+                context_window_compression=genai_types.ContextWindowCompressionConfig(
+                    sliding_window=genai_types.SlidingWindow(),
+                ),
+                session_resumption=genai_types.SessionResumptionConfig(),
                 # Visual detail vs audio latency trade-off (see _media_resolution).
                 # MEDIUM by default; set GEMINI_LIVE_MEDIA_RESOLUTION=HIGH to read
                 # finer detail at the cost of slower replies.

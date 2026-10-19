@@ -424,6 +424,35 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
+    # Forward each COMPLETED conversation turn to the AssessVox server, so the UI
+    # shows the full, correctly-ordered transcript. The browser's live
+    # transcription stream can drop the start of a turn (the greeting showed only
+    # its question tail); these committed items carry the whole turn.
+    _sid = (spec or {}).get("session_id")
+    _server_url = os.getenv("ASSESSVOX_SERVER_URL", "http://127.0.0.1:8000")
+    if _sid:
+        import httpx as _httpx
+
+        async def _post_turn(role: str, text: str) -> None:
+            try:
+                async with _httpx.AsyncClient(timeout=5) as _c:
+                    await _c.post(
+                        f"{_server_url}/api/sessions/{_sid}/video-turn",
+                        json={"role": role, "text": text},
+                    )
+            except Exception:
+                pass
+
+        @session.on("conversation_item_added")
+        def _forward_turn(ev) -> None:
+            try:
+                role = getattr(ev.item, "role", "") or ""
+                text = (ev.item.text_content or "").strip()
+            except Exception:
+                return
+            if text and role in ("assistant", "user"):
+                asyncio.create_task(_post_turn(role, text))
+
     # The examiner opens the conversation. Gemini Live otherwise waits silently
     # for the student to speak first, so neither side talks and the exam never
     # starts ("conversation not being established"). Trigger an opening turn.

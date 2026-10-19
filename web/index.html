@@ -948,6 +948,7 @@
   // ─── Call button — connect / disconnect toggle ──────────────────────────
   // LiveKit (video-mode) state
   let livekitRoom = null;
+  let videoTranscriptPoller = null;
   let mediaRecorder = null;
   let recordedChunks = [];
   let sessionData = null;
@@ -1055,37 +1056,13 @@
         }
       });
 
-      // Live transcript — render examiner + student turns under the orb so the
-      // conversation is visible (parity with voice mode). We key by segment id
-      // and keep BOTH interim and final text: interim segments update in place
-      // (so text streams live) and finals overwrite the same id. Rendering only
-      // final segments dropped whatever never got a final flag, so the shown
-      // conversation looked incomplete.
-      const segMap = new Map();   // id -> { speaker, text, order }
-      let segOrder = 0;
+      // The conversation transcript is rendered from the SERVER (the LiveKit
+      // agent posts each completed turn — see videoTranscriptPoller below). The
+      // browser's live transcription stream is unreliable: it dropped the start
+      // of the examiner's greeting, showing only the question tail. We keep this
+      // event solely to flip the "live" indicator the moment text starts flowing.
       renderTranscript._lastSig = undefined;
-      livekitRoom.on('transcriptionReceived', (segments, participant) => {
-        const speaker = (participant && participant.isLocal) ? 'STUDENT' : 'EXAMINER';
-        let changed = false;
-        for (const seg of segments) {
-          const text = (seg.text || '').trim();
-          if (!text) continue;
-          const id = seg.id || `${speaker}:${seg.startTime || ''}:${segOrder}`;
-          if (segMap.has(id)) { segMap.get(id).text = text; }
-          else { segMap.set(id, { speaker, text, order: segOrder++ }); }
-          changed = true;
-        }
-        if (!changed) return;
-        // Rebuild ordered turns, merging consecutive same-speaker segments.
-        const ordered = [...segMap.values()].sort((a, b) => a.order - b.order);
-        const turns = [];
-        for (const s of ordered) {
-          const last = turns[turns.length - 1];
-          if (last && last.speaker === s.speaker) last.text += ' ' + s.text;
-          else turns.push({ speaker: s.speaker, text: s.text });
-        }
-        setLogLive(true); renderTranscript(turns);
-      });
+      livekitRoom.on('transcriptionReceived', () => { setLogLive(true); });
 
       // Echo cancellation is essential: without it the student's mic re-captures
       // the examiner's audio, which the model hears itself say → it repeats and
@@ -1112,6 +1089,22 @@
       setStatus('Video session live', 'live');
       setLive(true);
       setOrbState('listening');
+
+      // Render the conversation from the SERVER — the agent posts each completed
+      // turn, so this shows the full greeting and every turn in order (the live
+      // transcription stream dropped the greeting's opening).
+      if (videoTranscriptPoller) clearInterval(videoTranscriptPoller);
+      const pollVideoTranscript = async () => {
+        if (!sessionId) return;
+        try {
+          const r = await fetch(`/api/sessions/${sessionId}/transcript`);
+          if (!r.ok) return;
+          const j = await r.json();
+          if ((j.turns || []).length) { setLogLive(true); renderTranscript(j.turns); }
+        } catch (_) { /* ignore */ }
+      };
+      videoTranscriptPoller = setInterval(pollVideoTranscript, 1200);
+      pollVideoTranscript();
 
       // Drive the IDLE/LISTENING/TALKING orb from the examiner's state. Voice
       // mode gets this from RTVI events; the video (LiveKit) path had nothing
@@ -1151,6 +1144,9 @@
   }
 
   function _handleExamEnded() {
+    // Stop the live transcript poller — the report poller takes over below and
+    // the finalised transcript comes from the graded report.
+    if (videoTranscriptPoller) { clearInterval(videoTranscriptPoller); videoTranscriptPoller = null; }
     // Stop MediaRecorder first so we get the final chunks.
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     // Stop camera — LED off, tile replaced with grading overlay.

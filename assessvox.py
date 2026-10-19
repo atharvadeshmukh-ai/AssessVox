@@ -880,6 +880,13 @@ async def get_session_transcript(session_id: str):
         except Exception:
             pass
 
+    # 1b. Video session: the LiveKit agent reports each completed turn here
+    # (authoritative + complete). The browser's live transcription can miss the
+    # opening of a turn — e.g. the greeting showed only the question tail — so
+    # the UI polls this instead for video exams.
+    if _SESSIONS[session_id].get("requires_video"):
+        return {"turns": _SESSIONS[session_id].get("video_transcript", []), "final": False}
+
     # 2. Live frame-level collector (most up-to-date during the call)
     if dynamic_exam._CURRENT_SESSION_ID == session_id:
         latency = dynamic_exam.get_last_turn_latency()
@@ -891,6 +898,32 @@ async def get_session_transcript(session_id: str):
         return {"turns": ctx_turns, "final": False, "last_turn_latency": latency}
 
     return {"turns": [], "final": False, "last_turn_latency": None}
+
+
+class VideoTurnIn(BaseModel):
+    role: str   # "assistant" (examiner) or "user" (student)
+    text: str
+
+
+@app.post("/api/sessions/{session_id}/video-turn")
+async def post_video_turn(session_id: str, turn: VideoTurnIn):
+    """The LiveKit video agent posts each completed conversation turn here so the
+    UI can show the full, correctly-ordered transcript (the browser's live
+    transcription stream can drop the start of a turn)."""
+    s = _SESSIONS.get(session_id)
+    if not s:
+        raise HTTPException(404, f"unknown session {session_id}")
+    text = (turn.text or "").strip()
+    if not text:
+        return {"ok": True}
+    speaker = "EXAMINER" if turn.role == "assistant" else "STUDENT"
+    vt = s.setdefault("video_transcript", [])
+    # Merge consecutive turns from the same speaker into one block.
+    if vt and vt[-1]["speaker"] == speaker:
+        vt[-1]["text"] += " " + text
+    else:
+        vt.append({"speaker": speaker, "text": text})
+    return {"ok": True}
 
 
 @app.get("/api/sessions/{session_id}/report")

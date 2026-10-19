@@ -415,6 +415,14 @@
           </select>
           <div class="sub" style="margin-top:4px;font-size:11px">Groq → GROQ_API_KEY · OpenAI → OPENAI_API_KEY · Anthropic → ANTHROPIC_API_KEY · Cerebras → CEREBRAS_API_KEY</div>
 
+          <label style="margin-top:14px">Video Examiner Model <span class="sub" style="font-size:10px">(video exams only)</span></label>
+          <select id="live-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
+            <option value="gemini-3.8-live" selected>Gemini 3.8 Live — realtime voice + vision (recommended)</option>
+            <option value="gemini-3.8-live-extended-thinking">Gemini 3.8 Live · Extended Thinking — deeper reasoning, slower</option>
+            <option value="gemini-3.1-flash-live-preview">Gemini 3.1 Flash Live (legacy — retires 17 Nov 2026)</option>
+          </select>
+          <div class="sub" style="margin-top:4px;font-size:11px">Used only when the question requires video. Voice-only exams use the LLM Model above.</div>
+
           <label style="margin-top:14px">STT Provider</label>
           <select id="stt-provider-select" style="width:100%;padding:8px 10px;background:var(--panel-2);color:var(--text);border:1px solid var(--border-2);font-family:inherit;font-size:12px;letter-spacing:0.3px;">
             <option value="cartesia-ink-2" selected>Cartesia · Ink-2 (v2 turns API) — semantic endpointing, no mid-thought fragmentation, English only (recommended)</option>
@@ -855,6 +863,7 @@
     const defaultPrompt = $('grading-prompt').dataset.default || '';
     const custom = (promptOverride && promptOverride !== defaultPrompt) ? promptOverride : null;
     const [llm_provider, llm_model] = ($('llm-select').value || 'anthropic|claude-haiku-4-5').split('|');
+    const live_model = ($('live-select')?.value ?? 'gemini-3.8-live');
     const stt_provider = ($('stt-provider-select')?.value ?? 'cartesia-ink-2');
     const stt_language = ($('stt-language-select')?.value ?? 'en');
     const tts_voice = ($('tts-voice-select')?.value ?? 'e07c00bc-4134-4eae-9ea4-1a55fb45746b');
@@ -870,7 +879,7 @@
       const r = await fetch('/api/sessions', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, stt_provider, stt_language, tts_voice, use_turn_markers, enable_auto_summarization }),
+        body: JSON.stringify({ question, template_id, question_id, duration_minutes: duration, custom_grading_prompt: custom, student_name: studentName, llm_provider, llm_model, live_model, stt_provider, stt_language, tts_voice, use_turn_markers, enable_auto_summarization }),
       });
       if (!r.ok) {
         const err = await r.json();

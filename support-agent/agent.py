@@ -93,10 +93,17 @@ class ExamAgent(Agent):
         # process didn't run prewarm, so the build still happens here, not on the
         # first conversational turn).
         _gemini_ssl_ctx()
+        # Video examiner (Gemini Live) model: the UI's per-exam choice (spec
+        # "live_model") wins, then GEMINI_LIVE_MODEL, then the 3.8 Live default.
+        live_model = (
+            (spec or {}).get("live_model")
+            or os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live")
+        )
+        logger.info(f"Video examiner model: {live_model}")
         super().__init__(
             instructions=instructions,
             llm=google.realtime.RealtimeModel(
-                model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live"),
+                model=live_model,
                 # Female examiner voice. Gemini Live female voices: Aoede, Kore,
                 # Leda, Zephyr (male: Puck, Charon, Fenrir, Orus). Override with
                 # GEMINI_LIVE_VOICE in .env.

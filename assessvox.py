@@ -249,6 +249,10 @@ class CreateSessionRequest(BaseModel):
     # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude), "cerebras" (GPT-OSS 120B, free tier)
     llm_provider: str = DEFAULT_LLM_PROVIDER
     llm_model: str = DEFAULT_LLM_MODEL
+    # Realtime model for the VIDEO examiner (Gemini Live). None → server default
+    # (GEMINI_LIVE_MODEL env, falling back to gemini-3.8-live). Only used for
+    # video exams; voice-only exams use llm_provider/llm_model above.
+    live_model: str | None = None
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
     # no Whisper hallucinations), "cartesia-ink-2" (May 2026 ink-2 — #1 on
     # streaming STT leaderboards, built-in turn detection, English-only),
@@ -504,7 +508,14 @@ async def create_session(req: CreateSessionRequest):
             "skills_assessed": list(flow_spec.skills_assessed or []),
             "probe_pool": [p.model_dump() for p in flow_spec.probe_pool],
             "student_name": (req.student_name or "").strip() or None,
+            # Chosen video examiner (Gemini Live) model; agent falls back to its
+            # own env/default if absent.
+            "live_model": (req.live_model or "").strip() or None,
         }
+        logger.info(
+            f"Session {session_id} VIDEO examiner model = "
+            f"{exam_spec_for_agent['live_model'] or '(server default)'}"
+        )
         await _create_livekit_room(livekit_room, exam_spec_for_agent)
         livekit_token, livekit_url = _mint_livekit_token(livekit_room, student_identity)
         _SESSIONS[session_id]["livekit_room"] = livekit_room

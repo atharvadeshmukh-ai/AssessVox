@@ -2462,6 +2462,22 @@ def build_probe_factories(flow_spec: FlowSpec) -> dict[str, Callable]:
 DEFAULT_LLM_MODEL = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash")
 
 
+def _gemini_thinking_level(model: str) -> str:
+    """Pick a thinking level the given Gemini model actually supports.
+
+    We want the LOWEST level to suppress the thought-signature blocks that
+    otherwise bloat context (3K -> 19K+ tokens). Older flash models (2.5, 3.5)
+    accept "minimal", which is ideal. gemini-3.8+ dropped "minimal" — the API
+    returns 400 INVALID_ARGUMENT ("Thinking level MINIMAL is not supported") —
+    and its floor is "low", so use that there. Picking by model keeps every
+    option in the UI dropdown working instead of crashing the voice bot.
+    """
+    m = (model or "").lower()
+    if "gemini-3.8" in m or "gemini-4" in m:
+        return "low"
+    return "minimal"
+
+
 # ─── Grading (ported from teacher2.py) ────────────────────────────────────────
 
 GRADER_MODEL = os.getenv("GEMINI_GRADER_MODEL", "gemini-3.5-flash")
@@ -3343,7 +3359,9 @@ async def run_bot(
         _gemini_settings = AssessVoxGoogleLLMService.Settings(
             model=llm_model,
             thinking=AssessVoxGoogleLLMService.ThinkingConfig(
-                thinking_level="minimal",
+                # Model-aware: gemini-3.8+ rejects "minimal" (400), floors at
+                # "low"; older flash keeps "minimal". See _gemini_thinking_level.
+                thinking_level=_gemini_thinking_level(llm_model),
                 include_thoughts=False,
             ),
         )

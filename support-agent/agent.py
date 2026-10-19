@@ -316,12 +316,37 @@ class ExamAgent(Agent):
         self._exam_ended = True
         logger.info(f"Exam ending: reason={reason!r}, closing={closing_words!r}")
 
-        # Give TTS a moment to finish speaking the closing line before we drop.
+        # Wait until the examiner has actually FINISHED speaking the closing
+        # line before we drop the room — a fixed 3s delay cut off longer
+        # closings mid-sentence.
+        async def _wait_until_done_speaking(max_wait: float = 20.0) -> None:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + max_wait
+            # Let the closing speech start before we inspect state.
+            await asyncio.sleep(0.5)
+            while loop.time() < deadline:
+                try:
+                    sp = self.session.current_speech
+                    if sp is not None:
+                        await sp.wait_for_playout()
+                    # Another chunk may still be queued; loop until idle.
+                    if str(getattr(self.session, "agent_state", "")) != "speaking":
+                        return
+                except Exception:
+                    return
+                await asyncio.sleep(0.3)
+
         async def _delayed_shutdown():
-            # Give TTS ~3s to finish speaking the closing words, then signal
-            # the browser before dropping the room so it can trigger the
-            # upload+grade flow on the client side.
-            await asyncio.sleep(3.0)
+            # Wait for the closing words to finish playing, then signal the
+            # browser before dropping the room so it can trigger the upload+grade
+            # flow on the client side.
+            try:
+                await _wait_until_done_speaking()
+            except Exception as e:
+                logger.warning(f"wait-for-closing failed, using fallback delay: {e}")
+                await asyncio.sleep(5.0)
+            # Small tail buffer so the last audio packets reach the browser.
+            await asyncio.sleep(1.0)
             try:
                 import json as _json
                 payload = _json.dumps({

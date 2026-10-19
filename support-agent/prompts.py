@@ -58,6 +58,41 @@ def build_exam_instructions(spec: dict[str, Any]) -> str:
     probe_block = "\n".join(probe_lines) or "  (no probes — improvise from the exam question)"
     required_str = ", ".join(sorted(required)) or "(none — all probes optional)"
 
+    # Name handling is conditional. When the teacher supplied the name, the
+    # examiner must NOT ask for it or call record_student_name — doing so made it
+    # ask "what's your name?" even though it already had it. When no name was
+    # supplied, it asks once and records it.
+    name_known = bool((spec.get("student_name") or "").strip())
+    if name_known:
+        greeting_name_line = (
+            f"1. Greet {student_name} warmly BY NAME and say you can see them on camera. "
+            f"You ALREADY KNOW their name is {student_name} — do NOT ask for it."
+        )
+        name_capture_note = (
+            f"(You already know the name is {student_name}. Do NOT call "
+            f"record_student_name and do NOT ask for their name.)"
+        )
+        record_tool_block = (
+            "RECORD_STUDENT_NAME\n"
+            f"  Do NOT call this — the student's name is already known: {student_name}.\n"
+            f"  If the student asks whether you know their name, say yes, it is {student_name}."
+        )
+    else:
+        greeting_name_line = (
+            "1. Greet the student warmly, say you can see them on camera, and ASK "
+            "for their first name."
+        )
+        name_capture_note = (
+            "(After the student says their name, call record_student_name once to "
+            "store it, then use it for the rest of the exam.)"
+        )
+        record_tool_block = (
+            "RECORD_STUDENT_NAME\n"
+            "  Call ONCE after the student says their name and you've confirmed it.\n"
+            "  Do not call more than once. After recording, you KNOW their name — "
+            "if later asked, say it; never claim you don't have it."
+        )
+
     return f"""# Persona
 You are an IB examiner conducting a live video oral exam. Tone: {examiner_tone}.
 
@@ -95,15 +130,14 @@ Topic context: {topic}
 Your first turn is a greeting — it is triggered for you automatically. Greet
 the student EXACTLY ONCE. Never greet twice, never repeat or rephrase the
 greeting, and do not greet again later in the session. In that single greeting:
-1. Greet {student_name} warmly by name and say you can see them on camera.
+{greeting_name_line}
 2. State ONLY the core question in one short, clear sentence — do NOT read a
    long paragraph or several bundled asks. If the question text is long or
    bundles extra instructions ("be ready to defend...", "engage with... too",
    "choose 3 objects and..."), pose just the central question now; bring the
    rest in later as follow-ups.
 3. Invite them to begin — show their setup / start their demo.
-Then STOP and wait silently for the student to respond. (Call
-record_student_name once, after they confirm their name.)
+Then STOP and wait silently for the student to respond. {name_capture_note}
 
 # Skills being assessed
 {skills_block}
@@ -118,9 +152,7 @@ strong, or to scaffold when they're struggling.
 # Function calling rules — MANDATORY
 You have four tools. Use them to track structured progress.
 
-RECORD_STUDENT_NAME
-  Call ONCE after the student says their name and you've confirmed it.
-  Do not call more than once.
+{record_tool_block}
 
 ADVANCE_PROBE
   Call whenever the student has given a substantive answer to the current probe

@@ -1056,22 +1056,35 @@
       });
 
       // Live transcript — render examiner + student turns under the orb so the
-      // conversation is visible (parity with voice mode).
-      const videoTurns = [];
+      // conversation is visible (parity with voice mode). We key by segment id
+      // and keep BOTH interim and final text: interim segments update in place
+      // (so text streams live) and finals overwrite the same id. Rendering only
+      // final segments dropped whatever never got a final flag, so the shown
+      // conversation looked incomplete.
+      const segMap = new Map();   // id -> { speaker, text, order }
+      let segOrder = 0;
       renderTranscript._lastSig = undefined;
       livekitRoom.on('transcriptionReceived', (segments, participant) => {
         const speaker = (participant && participant.isLocal) ? 'STUDENT' : 'EXAMINER';
-        let added = false;
+        let changed = false;
         for (const seg of segments) {
-          if (!seg.final) continue;
           const text = (seg.text || '').trim();
           if (!text) continue;
-          const last = videoTurns[videoTurns.length - 1];
-          if (last && last.speaker === speaker) last.text += ' ' + text;
-          else videoTurns.push({ speaker, text });
-          added = true;
+          const id = seg.id || `${speaker}:${seg.startTime || ''}:${segOrder}`;
+          if (segMap.has(id)) { segMap.get(id).text = text; }
+          else { segMap.set(id, { speaker, text, order: segOrder++ }); }
+          changed = true;
         }
-        if (added) { setLogLive(true); renderTranscript(videoTurns); }
+        if (!changed) return;
+        // Rebuild ordered turns, merging consecutive same-speaker segments.
+        const ordered = [...segMap.values()].sort((a, b) => a.order - b.order);
+        const turns = [];
+        for (const s of ordered) {
+          const last = turns[turns.length - 1];
+          if (last && last.speaker === s.speaker) last.text += ' ' + s.text;
+          else turns.push({ speaker: s.speaker, text: s.text });
+        }
+        setLogLive(true); renderTranscript(turns);
       });
 
       // Echo cancellation is essential: without it the student's mic re-captures

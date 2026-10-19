@@ -26,6 +26,28 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
+# ── Windows: never block on a crash dialog ───────────────────────────────────
+# livekit_ffi.dll's bundled soxr resampler can hit a native assertion
+# ("FFT_LEN == -1") on this box. By default that pops a modal Visual C++ dialog
+# (Abort/Retry/Ignore) which FREEZES the worker until someone clicks it — the
+# whole video exam hangs. Suppress the OS error boxes and route CRT abort to
+# stderr so the worker instead dies fast and the server's watchdog respawns it.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+        for _crt in ("ucrtbase", "msvcrt"):
+            try:
+                _lib = ctypes.CDLL(_crt)
+                # _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT):
+                # clear both bits so abort() does not raise a dialog.
+                _lib._set_abort_behavior(0, 0x1 | 0x2)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
 # ── Fast TLS, scoped to Gemini ───────────────────────────────────────────────
 # On this Windows / Python 3.14 box, ssl.create_default_context() loads the
 # certifi CA bundle in 3-8 SECONDS. google-genai rebuilds that context on every

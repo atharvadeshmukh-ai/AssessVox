@@ -63,6 +63,7 @@ except ImportError:
 import dynamic_exam
 from dynamic_exam import (
     DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_PROVIDER,
     DIMENSION_GUIDE,
     FLOWS_DIR,
     GRADING_PROMPT,
@@ -136,9 +137,10 @@ async def get_session_timeline(session_id: str):
 _LLM_MODEL_BLOCKLIST = frozenset()  # gemini-3.1-flash-lite re-enabled for testing
 _LLM_MODEL_FALLBACK = "gemini-3.5-flash"
 
-# DEFAULT_LLM_MODEL (imported from dynamic_exam) is the single source of truth
-# for the conversation LLM default, so the server, run_bot and run_session all
-# agree. Override in .env with GEMINI_CONVERSATION_MODEL.
+# DEFAULT_LLM_PROVIDER / DEFAULT_LLM_MODEL (imported from dynamic_exam) are the
+# single source of truth for the conversation LLM default, so the server,
+# run_bot and run_session all agree. Override in .env with DEFAULT_LLM_PROVIDER
+# / DEFAULT_LLM_MODEL.
 
 
 def _coerce_llm_model(provider: str, model: str) -> str:
@@ -245,7 +247,7 @@ class CreateSessionRequest(BaseModel):
     # (custom text) or the template's flow_spec.exam_question default.
     question_id: str | None = None
     # LLM provider: "google" (Gemini), "groq" (Llama), "openai" (GPT), "anthropic" (Claude), "cerebras" (GPT-OSS 120B, free tier)
-    llm_provider: str = "google"
+    llm_provider: str = DEFAULT_LLM_PROVIDER
     llm_model: str = DEFAULT_LLM_MODEL
     # STT vendor: "cartesia" (ink-whisper, default — cheapest + cleanest;
     # no Whisper hallucinations), "cartesia-ink-2" (May 2026 ink-2 — #1 on
@@ -930,7 +932,7 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             flow_spec=s["flow_spec"],
             custom_grading_prompt=s.get("custom_grading_prompt"),
             student_name=s.get("student_name"),
-            llm_provider=s.get("llm_provider", "google"),
+            llm_provider=s.get("llm_provider", DEFAULT_LLM_PROVIDER),
             llm_model=s.get("llm_model", DEFAULT_LLM_MODEL),
             stt_provider=s.get("stt_provider", "cartesia-ink-2"),
             stt_language=s.get("stt_language", "en"),

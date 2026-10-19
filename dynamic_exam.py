@@ -2457,9 +2457,14 @@ def build_probe_factories(flow_spec: FlowSpec) -> dict[str, Callable]:
 
 
 # Single source of truth for the conversation LLM default, shared by run_bot,
-# run_session, and the server (assessvox imports this). Defined once so every
-# entry point runs the same model regardless of how the exam was started.
-DEFAULT_LLM_MODEL = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash")
+# run_session, and the server (assessvox imports both). Defined once so every
+# entry point runs the same provider+model regardless of how the exam started.
+# Default = Claude Haiku 4.5: fastest measured time-to-first-token (~0.7s vs
+# ~4.7s for gemini-3.5-flash on the same network) and it handles the exam's
+# function-calling. Override per-exam from the UI dropdown, or globally via the
+# DEFAULT_LLM_PROVIDER / DEFAULT_LLM_MODEL env vars.
+DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic")
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "claude-haiku-4-5")
 
 
 def _gemini_thinking_level(model: str) -> str:
@@ -3243,7 +3248,7 @@ async def run_bot(
     transport: BaseTransport,
     runner_args: RunnerArguments,
     session_id: str,
-    llm_provider: str = "google",
+    llm_provider: str = DEFAULT_LLM_PROVIDER,
     llm_model: str = DEFAULT_LLM_MODEL,
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
@@ -3996,7 +4001,7 @@ async def run_session(
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
-    llm_provider: str = "google",
+    llm_provider: str = DEFAULT_LLM_PROVIDER,
     llm_model: str = DEFAULT_LLM_MODEL,
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",

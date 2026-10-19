@@ -26,28 +26,23 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
-# ── Fast TLS: memoise the SSL context ────────────────────────────────────────
+# ── Fast TLS, scoped to Gemini ───────────────────────────────────────────────
 # On this Windows / Python 3.14 box, ssl.create_default_context() loads the
 # certifi CA bundle in 3-8 SECONDS. google-genai rebuilds that context on every
-# Gemini Live (re)connection, and each rebuild FREEZES the agent event loop for
-# seconds — which lags the conversation AND trips the WebSocket heartbeat,
-# causing more drops, more reconnects, more rebuilds (we saw 28 of them, up to
-# 7.7s each). Memoise so the context is built at most once per arg-set and
-# reused instantly on every reconnect.
-_SSL_CTX_CACHE: dict = {}
-_orig_create_default_context = _ssl.create_default_context
+# Gemini Live (re)connection, each rebuild FREEZING the agent event loop — which
+# lags the conversation and trips the WebSocket heartbeat (more drops, more
+# rebuilds). We build ONE context (once, at worker warm-up, off the hot path)
+# and hand it ONLY to the Gemini client via http_options, so there is no
+# per-connection rebuild and — unlike monkeypatching ssl globally — no single
+# SSL context object shared across every other library in the process.
+_GEMINI_SSL_CTX = None
 
 
-def _memoised_create_default_context(purpose=_ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
-    key = (purpose, cafile, capath, cadata if isinstance(cadata, (str, bytes, type(None))) else id(cadata))
-    ctx = _SSL_CTX_CACHE.get(key)
-    if ctx is None:
-        ctx = _orig_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
-        _SSL_CTX_CACHE[key] = ctx
-    return ctx
-
-
-_ssl.create_default_context = _memoised_create_default_context
+def _gemini_ssl_ctx():
+    global _GEMINI_SSL_CTX
+    if _GEMINI_SSL_CTX is None:
+        _GEMINI_SSL_CTX = _ssl.create_default_context()
+    return _GEMINI_SSL_CTX
 
 from dotenv import load_dotenv
 from livekit import agents
@@ -93,10 +88,15 @@ class ExamAgent(Agent):
 
     def __init__(self, spec: dict | None, ctx: JobContext):
         instructions = build_exam_instructions(spec) if spec else INTERVIEW_INSTRUCTIONS
+        # Ensure our scoped SSL context exists before building the Gemini client
+        # (prewarm normally has it ready; this guards the case where this job
+        # process didn't run prewarm, so the build still happens here, not on the
+        # first conversational turn).
+        _gemini_ssl_ctx()
         super().__init__(
             instructions=instructions,
             llm=google.realtime.RealtimeModel(
-                model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
+                model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live"),
                 # Female examiner voice. Gemini Live female voices: Aoede, Kore,
                 # Leda, Zephyr (male: Puck, Charon, Fenrir, Orus). Override with
                 # GEMINI_LIVE_VOICE in .env.
@@ -118,6 +118,22 @@ class ExamAgent(Agent):
                         strategy="scale_aspect_fit",
                     ),
                     quality=75,
+                ),
+                # Hand Gemini our single, pre-built SSL context (warmed in
+                # prewarm, off the audio path) so it SKIPS its own
+                # ssl.create_default_context() — which on this box costs 0.6-8s
+                # and otherwise runs at session start AND on every reconnect,
+                # freezing the voice. google-genai has TWO separate SSL paths
+                # that read DIFFERENT keys, so we must set both:
+                #   • the Live WEBSOCKET reads async_client_args["ssl"]
+                #   • the HTTPX client reads client_args/async_client_args["verify"]
+                # Setting only "ssl" (as we first did) left the httpx path still
+                # rebuilding (~624ms block at Client.__init__, seen in the logs).
+                # This stays scoped to the Gemini client — no global ssl patch
+                # shared with every other library in the worker.
+                http_options=genai_types.HttpOptions(
+                    client_args={"verify": _gemini_ssl_ctx()},
+                    async_client_args={"ssl": _gemini_ssl_ctx(), "verify": _gemini_ssl_ctx()},
                 ),
             ),
         )
@@ -274,14 +290,11 @@ def prewarm(proc):
     # turn these each block the agent event loop for seconds (SSL context ~4s,
     # PIL ~1s), delaying the examiner's audio and the first video frame.
     try:
-        # Build + cache the SSL context now (memoised at import). google-genai
-        # reuses it on every Gemini reconnect instead of rebuilding (3-8s each).
-        _ssl.create_default_context()
-        try:
-            import certifi
-            _ssl.create_default_context(cafile=certifi.where())
-        except Exception:
-            pass
+        # Build + cache our scoped Gemini SSL context now, off the hot path. It
+        # is handed to the Gemini Live client via http_options (see ExamAgent),
+        # which then skips its own create_default_context() on every reconnect
+        # (3-8s each on this box).
+        _gemini_ssl_ctx()
         import PIL.Image
         PIL.Image.preinit()
         # Warm numpy.fft — the transcription speaking-rate step runs an FFT on
@@ -366,15 +379,28 @@ async def entrypoint(ctx: JobContext):
     # The examiner opens the conversation. Gemini Live otherwise waits silently
     # for the student to speak first, so neither side talks and the exam never
     # starts ("conversation not being established"). Trigger an opening turn.
-    await session.generate_reply(
-        instructions=(
+    #
+    # Only restate the exam task when we actually have the exam details (spec).
+    # With no spec, the worker was started without an assessment selected, so
+    # inventing a task would mislead the student — greet and ask which
+    # assessment they want instead.
+    if spec:
+        opening = (
             "Greet the student warmly by name, say you can see them on camera, "
             "briefly restate the exam task in one sentence, and invite them to "
             "begin. Say this ONCE, in two or three sentences, then stop and wait "
             "for their response. Do NOT repeat yourself or re-ask. Do NOT claim "
             "to see any diagram, apparatus, or work yet — they haven't shown it."
         )
-    )
+    else:
+        opening = (
+            "Greet the student warmly, say you can see them on camera, and ask "
+            "which assessment they would like to do today. Say this ONCE, in one "
+            "or two sentences, then stop and wait for their answer. Do NOT invent "
+            "or assume an exam task, and do NOT claim to see any diagram or work "
+            "yet — they haven't shown it."
+        )
+    await session.generate_reply(instructions=opening)
 
 
 if __name__ == "__main__":

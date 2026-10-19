@@ -981,12 +981,15 @@ class MarkerStripFilter(FrameProcessor):
             # and TTS. Removing the bare characters is safe for a voice feed.
             cur = frame.text if marker_found else text
             if "*" in cur or "`" in cur:
-                cleaned = cur.replace("*", "").replace("`", "")
+                # Remove ONLY the markdown characters themselves and keep every
+                # other character — crucially spaces. Dropping a whole fragment
+                # that is just "* " (streaming splits emphasis off on its own)
+                # would glue neighbours together: "really important" ->
+                # "reallyimportant". So we never drop the frame here.
+                # Also leave an asterisk that sits directly between digits alone
+                # so multiplication ("3*4") isn't mangled into "34".
+                cleaned = re.sub(r"(?<!\d)\*(?!\d)", "", cur).replace("`", "")
                 frame.text = cleaned
-                # If the frame was ONLY markdown chars (e.g. "**"), drop it so
-                # TTS doesn't get an empty/odd fragment.
-                if cur.strip() and not cleaned.strip():
-                    return
 
         await self.push_frame(frame, direction)
 
@@ -2340,6 +2343,10 @@ async def handle_begin_exam(
     flow_manager.state.update({
         "off_topic_count": 0,
         "current_probe": "opening",
+        # Start the exam proper with a clean no-response count so any silences
+        # during the greeting don't carry over into the first question.
+        "idle_strikes": 0,
+        "idle_advance_pending": False,
     })
     # exam question already spoken in speak field — opening is silent.
     return ({}, create_opening_node(flow_manager, respond_immediately=False))
@@ -2447,6 +2454,12 @@ def build_probe_factories(flow_spec: FlowSpec) -> dict[str, Callable]:
         probe.id: (lambda fm, p=probe: create_dynamic_probe_node(fm, p))
         for probe in flow_spec.probe_pool
     }
+
+
+# Single source of truth for the conversation LLM default, shared by run_bot,
+# run_session, and the server (assessvox imports this). Defined once so every
+# entry point runs the same model regardless of how the exam was started.
+DEFAULT_LLM_MODEL = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash")
 
 
 # ─── Grading (ported from teacher2.py) ────────────────────────────────────────
@@ -2601,25 +2614,39 @@ def _grade_call_with_retry(fn, *, attempts: int = 4, what: str = "grading"):
         _net_errs = (httpx.TransportError, ConnectionError, TimeoutError)
     except Exception:
         _net_errs = (ConnectionError, TimeoutError)
-    _transient_markers = (
-        "10054", "forcibly closed", "connection reset", "connection aborted",
-        "timed out", "timeout", "temporarily", "unavailable", "503", "502", "500",
-        "remotedisconnected", "server disconnected",
-    )
+    try:
+        from google.genai import errors as _genai_errors
+    except Exception:
+        _genai_errors = None
+
+    def _is_retriable(e: Exception) -> bool:
+        # Retry transport/network failures...
+        if isinstance(e, _net_errs):
+            return True
+        # ...and SERVER errors (HTTP 5xx) reported by the google-genai library,
+        # classified by STATUS CODE, not by words in the message. Never retry a
+        # client error (4xx: bad key, 400 bad request, 402/429 quota) — it can't
+        # succeed on retry and only wastes quota and delays the failure.
+        if _genai_errors is not None and isinstance(e, getattr(_genai_errors, "APIError", ())):
+            code = getattr(e, "code", None) or getattr(e, "status_code", None)
+            try:
+                return int(code) >= 500
+            except (TypeError, ValueError):
+                return isinstance(e, getattr(_genai_errors, "ServerError", ()))
+        return False
+
     last_exc = None
     for i in range(1, attempts + 1):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001 — classify below, re-raise non-transient
-            msg = str(e).lower()
-            is_transient = isinstance(e, _net_errs) or any(m in msg for m in _transient_markers)
-            if not is_transient:
+        except Exception as e:  # noqa: BLE001 — classify below, re-raise non-retriable
+            if not _is_retriable(e):
                 raise
             last_exc = e
             if i < attempts:
                 wait = 2 ** (i - 1)  # 1s, 2s, 4s
                 logger.warning(
-                    f"{what}: transient network error (attempt {i}/{attempts}): "
+                    f"{what}: transient error (attempt {i}/{attempts}): "
                     f"{type(e).__name__}: {str(e)[:120]}; retrying in {wait}s"
                 )
                 _time.sleep(wait)
@@ -2960,6 +2987,12 @@ class ProbeAttemptCounter(FrameProcessor):
             state.update({
                 "student_utterance_count": state.get("student_utterance_count", 0) + 1
             })
+            # The student spoke, so any accumulated silence no longer counts —
+            # reset the no-response escalation here (NOT only when the exam moves
+            # to a new question). Also clear the idle-advance marker so a leftover
+            # one can never make the student's next real answer skip its reset.
+            if state.get("idle_strikes") or state.get("idle_advance_pending"):
+                state.update({"idle_strikes": 0, "idle_advance_pending": False})
             current = state.get("current_probe")
             if current:
                 attempts: dict[str, int] = dict(state.get("probe_attempts", {}))
@@ -3195,7 +3228,7 @@ async def run_bot(
     runner_args: RunnerArguments,
     session_id: str,
     llm_provider: str = "google",
-    llm_model: str = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash"),
+    llm_model: str = DEFAULT_LLM_MODEL,
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
@@ -3946,7 +3979,7 @@ async def run_session(
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
     llm_provider: str = "google",
-    llm_model: str = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash"),
+    llm_model: str = DEFAULT_LLM_MODEL,
     stt_provider: str = "cartesia-ink-2",
     stt_language: str | None = "en",
     tts_voice: str = "e07c00bc-4134-4eae-9ea4-1a55fb45746b",

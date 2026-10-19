@@ -1185,6 +1185,9 @@
             clearInterval(reportPoller); reportPoller = null;
             const report = await r.json();
             _hideGradingOverlay();
+            // Fully clear the finished session so the next Start Exam is clean.
+            if (livekitRoom) { try { livekitRoom.disconnect(); } catch (_) {} livekitRoom = null; }
+            sessionId = null;
             $('call-btn').disabled = false;
             $('call-btn').classList.remove('live');
             $('call-btn').classList.add('ready');
@@ -1428,6 +1431,13 @@
         const report = await r.json();
         clearInterval(reportPoller); reportPoller = null;
         if (transcriptPoller) { clearInterval(transcriptPoller); transcriptPoller = null; }
+        // Fully clear the FINISHED session before re-enabling the button, so the
+        // next click starts a clean new exam instead of reconnecting to this one
+        // or getting stuck (handleDisconnect leaves `pc` set, which would make
+        // the button call disconnect() instead of starting).
+        if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+        if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch (_) {} micStream = null; }
+        sessionId = null;
         // Grading is done — reset the button out of the greyed "Grading…" state
         // so the student knows the report is ready (and can start a new exam).
         $('call-btn').disabled = false;
@@ -1457,8 +1467,9 @@
     if (sig === renderTranscript._lastSig) return;
     renderTranscript._lastSig = sig;
     // Strip stray markdown (*, **, `) the model sometimes emits — never meant
-    // to be shown in a spoken-exam transcript.
-    const clean = (s) => (s || '').replace(/[*`]/g, '');
+    // to be shown. Keep spaces (replace preserves them) and leave an asterisk
+    // between digits alone so "3*4" multiplication isn't mangled into "34".
+    const clean = (s) => (s || '').replace(/(?<!\d)\*(?!\d)/g, '').replace(/`/g, '');
     const html = turns.map(t => `
       <div class="turn">
         <div class="who ${t.speaker.toLowerCase()}">${esc(t.speaker)}</div>

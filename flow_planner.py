@@ -52,21 +52,56 @@ Return ONLY valid JSON. No markdown fences. No explanation. No extra text.
 """
 
 
+def _question_too_long(question: str, max_words: int = 25) -> bool:
+    """True if the opening question is over the word cap or is compound.
+
+    The planner is told to keep exam_question short and single-focus, but it
+    sometimes returns a long or multi-part question anyway (two '?'s, or "and"
+    joining two asks). Those overwhelm students mid-exam, so we catch them here
+    and regenerate once.
+    """
+    q = (question or "").strip()
+    if len(q.split()) > max_words:
+        return True
+    if q.count("?") > 1:  # more than one question packed in
+        return True
+    return False
+
+
 async def generate_flow(topic: str, duration: int = 6) -> FlowSpec:
     """Call Gemini to generate a FlowSpec for the given topic."""
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     logger.info(f"Generating flow for topic: {topic!r}")
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=PLANNER_PROMPT.format(topic=topic, duration=duration),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        ),
-    )
 
-    data = json.loads(response.text)
-    spec = FlowSpec.model_validate(data)
+    prompt = PLANNER_PROMPT.format(topic=topic, duration=duration)
+    spec: FlowSpec | None = None
+    # One regeneration attempt if the opening question comes back too long or
+    # compound. We nudge the second call with an explicit, stronger constraint.
+    for attempt in range(2):
+        contents = prompt
+        if attempt == 1:
+            contents = (
+                prompt
+                + "\n\nIMPORTANT: the previous exam_question was too long or "
+                "asked more than one thing. Return exam_question as ONE single "
+                "question of at most 25 words, with exactly one '?'."
+            )
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+        candidate = FlowSpec.model_validate(json.loads(response.text))
+        spec = candidate
+        if not _question_too_long(candidate.exam_question):
+            break
+        logger.warning(
+            f"Exam question too long/compound ({len(candidate.exam_question.split())} "
+            f"words), regenerating: {candidate.exam_question!r}"
+        )
 
     logger.info(f"Flow generated: {len(spec.probe_pool)} probes, required={spec.required_probes}")
     logger.debug(f"Exam question: {spec.exam_question}")

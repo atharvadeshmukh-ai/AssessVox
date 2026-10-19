@@ -62,6 +62,7 @@ except ImportError:
 # Local imports
 import dynamic_exam
 from dynamic_exam import (
+    DEFAULT_LLM_MODEL,
     DIMENSION_GUIDE,
     FLOWS_DIR,
     GRADING_PROMPT,
@@ -135,13 +136,9 @@ async def get_session_timeline(session_id: str):
 _LLM_MODEL_BLOCKLIST = frozenset()  # gemini-3.1-flash-lite re-enabled for testing
 _LLM_MODEL_FALLBACK = "gemini-3.5-flash"
 
-# Default conversation LLM. gemini-3.5-flash is accurate but slow (~4.4s TTFB /
-# ~2.6s per call), which produces audible dead air mid-turn — the examiner
-# pauses between sentences and around function-routing (two-call) turns, so the
-# voice "breaks" in the middle of a response. A faster tier closes those gaps.
-# Override in .env with GEMINI_CONVERSATION_MODEL (e.g. back to gemini-3.5-flash
-# if exam-flow adherence regresses).
-DEFAULT_LLM_MODEL = os.getenv("GEMINI_CONVERSATION_MODEL", "gemini-2.5-flash")
+# DEFAULT_LLM_MODEL (imported from dynamic_exam) is the single source of truth
+# for the conversation LLM default, so the server, run_bot and run_session all
+# agree. Override in .env with GEMINI_CONVERSATION_MODEL.
 
 
 def _coerce_llm_model(provider: str, model: str) -> str:
@@ -671,28 +668,50 @@ async def grade_video_session(session_id: str, background_tasks: BackgroundTasks
 
 _LK_WORKER_PROC: "subprocess.Popen | None" = None
 
+# Records the PID of the worker WE spawned so a later run can stop exactly that
+# process — never every agent.py on the machine (the old scan killed unrelated
+# workers, e.g. a colleague's, and even our own server if its cmdline matched).
+_LK_WORKER_PIDFILE = Path(__file__).parent / ".livekit_worker.pid"
+
 
 def _kill_stale_livekit_workers() -> None:
-    """Kill any leftover agent.py workers from a previous run before spawning.
+    """Stop the worker from a *previous* run of THIS server, if still alive.
 
-    Each stale worker stays registered with LiveKit Cloud and can be dispatched
-    the next video session — running old code or with detached output — so a new
-    exam silently goes to the wrong worker. Killing them first guarantees only
-    the current build serves video rooms.
+    A stale worker stays registered with LiveKit Cloud and can be dispatched the
+    next video session — running old code or with detached output — so a new exam
+    silently goes to the wrong worker. We stop only the PID we recorded last run
+    (verifying it is actually an agent.py process, in case the PID was recycled),
+    not an indiscriminate scan of every agent.py on the box.
     """
+    try:
+        raw = _LK_WORKER_PIDFILE.read_text().strip()
+    except (FileNotFoundError, OSError):
+        return
+    try:
+        pid = int(raw)
+    except ValueError:
+        _LK_WORKER_PIDFILE.unlink(missing_ok=True)
+        return
+    if pid == os.getpid():
+        _LK_WORKER_PIDFILE.unlink(missing_ok=True)
+        return
     try:
         import psutil
     except Exception:
+        _LK_WORKER_PIDFILE.unlink(missing_ok=True)
         return
-    me = os.getpid()
-    for p in psutil.process_iter(["pid", "cmdline"]):
-        try:
-            cmdline = p.info.get("cmdline") or []
-            if p.pid != me and any("agent.py" in str(c) for c in cmdline):
-                p.kill()
-                logger.info(f"Killed stale LiveKit worker pid={p.pid}")
-        except Exception:
-            pass
+    try:
+        p = psutil.Process(pid)
+        cmdline = p.cmdline()
+        if any("agent.py" in str(c) for c in cmdline):
+            p.kill()
+            logger.info(f"Killed stale LiveKit worker pid={pid}")
+    except psutil.NoSuchProcess:
+        pass  # already gone
+    except Exception as e:
+        logger.warning(f"Could not stop stale LiveKit worker pid={pid}: {e}")
+    finally:
+        _LK_WORKER_PIDFILE.unlink(missing_ok=True)
 
 
 def _spawn_livekit_worker() -> None:
@@ -717,6 +736,10 @@ def _spawn_livekit_worker() -> None:
         cmd, cwd=str(Path(__file__).parent), env=env,
         stdout=sys.stdout, stderr=sys.stderr,
     )
+    try:
+        _LK_WORKER_PIDFILE.write_text(str(_LK_WORKER_PROC.pid))
+    except OSError as e:
+        logger.warning(f"Could not write worker PID file: {e}")
     logger.info(f"LiveKit worker spawned (pid={_LK_WORKER_PROC.pid})")
 
 
@@ -733,6 +756,8 @@ def _shutdown_livekit_worker() -> None:
             _LK_WORKER_PROC.kill()
     except Exception as e:
         logger.warning(f"Error stopping LiveKit worker: {e}")
+    finally:
+        _LK_WORKER_PIDFILE.unlink(missing_ok=True)
 
 
 import atexit
@@ -742,23 +767,55 @@ atexit.register(_shutdown_livekit_worker)
 _WORKER_WATCHDOG_TASK: "asyncio.Task | None" = None
 
 
-async def _worker_watchdog() -> None:
-    """Respawn the LiveKit worker if it dies.
+_WATCHDOG_MAX_RESPAWNS = 5          # give up after this many consecutive deaths
+_WATCHDOG_POLL_SECONDS = 15         # base poll interval
+_WATCHDOG_BACKOFF_CAP_SECONDS = 60  # max wait between respawns
 
-    The worker gives up and exits after ~16 failed connection attempts (e.g. a
-    transient DNS/network blip reaching LiveKit Cloud). Without this, one hiccup
-    silently takes video mode down until the whole server is restarted — the
-    examiner simply never joins the room and never speaks.
+
+async def _worker_watchdog() -> None:
+    """Respawn the LiveKit worker if it dies, with backoff and a give-up cap.
+
+    The worker exits after ~16 failed connection attempts (e.g. a transient
+    DNS/network blip reaching LiveKit Cloud). Without this, one hiccup silently
+    takes video mode down until the whole server is restarted — the examiner
+    never joins the room and never speaks.
+
+    To avoid a tight respawn loop when the worker can't start at all (bad creds,
+    import error), consecutive respawns back off 15s → 30s → 60s (capped), and
+    after 5 in a row we stop trying and log a clear, actionable error. A worker
+    that stays up long enough to serve resets the counter.
     """
+    consecutive = 0
     while True:
-        await asyncio.sleep(15)
+        delay = min(
+            _WATCHDOG_POLL_SECONDS * (2 ** max(0, consecutive - 1)),
+            _WATCHDOG_BACKOFF_CAP_SECONDS,
+        ) if consecutive else _WATCHDOG_POLL_SECONDS
+        await asyncio.sleep(delay)
+
         proc = _LK_WORKER_PROC
-        if proc is not None and proc.poll() is not None:
-            logger.warning(
-                f"LiveKit worker (pid={proc.pid}) exited (code={proc.returncode}); "
-                "respawning so video sessions keep working"
+        if proc is None or proc.poll() is None:
+            # No worker expected, or it is alive and well — healthy, reset.
+            consecutive = 0
+            continue
+
+        if consecutive >= _WATCHDOG_MAX_RESPAWNS:
+            logger.error(
+                f"LiveKit worker died {consecutive} times in a row and will NOT "
+                "be respawned again. Video mode is DOWN. Check LIVEKIT_URL / "
+                "LIVEKIT_API_KEY / LIVEKIT_API_SECRET and support-agent/agent.py "
+                "startup errors above, then restart the server."
             )
-            _spawn_livekit_worker()
+            return
+
+        consecutive += 1
+        logger.warning(
+            f"LiveKit worker (pid={proc.pid}) exited (code={proc.returncode}); "
+            f"respawning (attempt {consecutive}/{_WATCHDOG_MAX_RESPAWNS})"
+        )
+        # Spawn off the event loop — _kill_stale_livekit_workers may call into
+        # psutil, which can briefly block — so the server stays responsive.
+        await asyncio.to_thread(_spawn_livekit_worker)
 
 
 @app.on_event("startup")

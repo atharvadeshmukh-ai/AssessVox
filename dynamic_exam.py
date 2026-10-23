@@ -1014,23 +1014,47 @@ LLM_CALLS_DIR   = Path(__file__).parent / "llm_calls"
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 
 # ─── Module-level flow state (populated at startup) ────────────────────────────
+# NOTE: these are module globals, so they are shared by all voice bots in the
+# process. That is safe for one exam at a time, but concurrent voice exams in the
+# same process would overwrite each other. (A ContextVar was tried but does not
+# propagate into pipecat's transport event handlers; the correct per-session fix
+# is to carry this on flow_manager.state — a tested follow-up.)
 _FLOW_SPEC: FlowSpec | None = None
 _PROBE_FACTORIES: dict[str, Callable] = {}
 _REQUIRED_PROBES: set[str] = set()
 _CUSTOM_GRADING_PROMPT: str | None = None
 
-# Set when a session is running, so the server can read the live transcript
+# Set when a session is running, so the server can read the live transcript.
+# _CURRENT_* remain as a single-session fallback; _LIVE_SESSIONS is the
+# per-session registry (keyed by session_id) that makes CONCURRENT voice exams
+# each expose their OWN live transcript to the /transcript endpoint instead of
+# all reading one shared global (which would leak one student's conversation
+# into another's panel).
 _CURRENT_CONTEXT = None
 _CURRENT_SESSION_ID: str | None = None
+_LIVE_SESSIONS: dict = {}   # session_id -> {"context": ctx, "transcript": LiveTranscript}
 
 
-def get_current_transcript() -> list[dict]:
-    """Return diarized turns from the active session's LLMContext.
-    Empty list if no session is running."""
-    if _CURRENT_CONTEXT is None:
+def _register_live_session(session_id, context, transcript) -> None:
+    _LIVE_SESSIONS[session_id] = {"context": context, "transcript": transcript}
+
+
+def _unregister_live_session(session_id) -> None:
+    _LIVE_SESSIONS.pop(session_id, None)
+
+
+def get_current_transcript(session_id: str | None = None) -> list[dict]:
+    """Return diarized turns from a session's LLMContext (by session_id when
+    given, else the single-session fallback). Empty list if none."""
+    ctx = None
+    if session_id is not None and session_id in _LIVE_SESSIONS:
+        ctx = _LIVE_SESSIONS[session_id]["context"]
+    if ctx is None:
+        ctx = _CURRENT_CONTEXT
+    if ctx is None:
         return []
     try:
-        return _extract_transcript(_CURRENT_CONTEXT)
+        return _extract_transcript(ctx)
     except Exception:
         return []
 
@@ -1054,6 +1078,51 @@ def set_active_flow(
     _REQUIRED_PROBES = set(flow_spec.required_probes)
     _CUSTOM_GRADING_PROMPT = custom_grading_prompt
     _PROVIDED_STUDENT_NAME = (student_name or "").strip() or None
+
+
+# ─── Per-session accessors (scalability / concurrency) ─────────────────────────
+# The per-session flow data is ALSO seeded onto flow_manager.state in run_bot.
+# Unlike a module global (shared by every concurrent exam in the process) or a
+# ContextVar (which does NOT reach pipecat's transport event handlers),
+# flow_manager.state is a per-exam dict that pipecat makes available to EVERY
+# node builder and handler. These accessors read it from there, falling back to
+# the module global when flow_manager is absent/unseeded — so single-exam
+# behaviour is byte-identical, while concurrent exams each read their OWN state.
+def _fspec(fm=None):
+    if fm is not None:
+        v = fm.state.get("flow_spec")
+        if v is not None:
+            return v
+    return _FLOW_SPEC
+
+
+def _pfact(fm=None):
+    if fm is not None:
+        v = fm.state.get("probe_factories")
+        if v:
+            return v
+    return _PROBE_FACTORIES
+
+
+def _rprobes(fm=None):
+    if fm is not None:
+        v = fm.state.get("required_probes")
+        if v is not None:
+            return v
+    return _REQUIRED_PROBES
+
+
+def _cgp(fm=None):
+    if fm is not None and "custom_grading_prompt" in fm.state:
+        return fm.state.get("custom_grading_prompt")
+    return _CUSTOM_GRADING_PROMPT
+
+
+def _psn(fm=None):
+    if fm is not None and "provided_student_name" in fm.state:
+        return fm.state.get("provided_student_name")
+    return _PROVIDED_STUDENT_NAME
+
 
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
@@ -1171,7 +1240,7 @@ ADVANCE_PROBE_SCHEMA = {
 
 # ─── Off-topic guardrail ───────────────────────────────────────────────────────
 
-def _off_topic_redirect_text(count: int, name: str) -> str:
+def _off_topic_redirect_text(count: int, name: str, fm=None) -> str:
     """The canned line spoken by the off-topic handler (NOT by the LLM).
 
     Kept out of the LLM prompt because Gemini Flash has been observed to
@@ -1179,7 +1248,7 @@ def _off_topic_redirect_text(count: int, name: str) -> str:
     student in silence. The handler speaks this via TTSSpeakFrame so the
     redirect is guaranteed regardless of Gemini's whim.
     """
-    redirect = _FLOW_SPEC.redirect_when_off_topic if _FLOW_SPEC else (
+    redirect = _fspec(fm).redirect_when_off_topic if _fspec(fm) else (
         "Let's bring it back to the main question."
     )
     if count == 0:
@@ -1196,7 +1265,7 @@ def _off_topic_redirect_text(count: int, name: str) -> str:
     )
 
 
-def _off_topic_instruction(count: int, name: str) -> str:
+def _off_topic_instruction(count: int, name: str, fm=None) -> str:
     """System-prompt fragment that tells the LLM WHEN to call the function.
 
     Note: the redirect TEXT is NOT included — the handler speaks it directly.
@@ -1207,8 +1276,8 @@ def _off_topic_instruction(count: int, name: str) -> str:
     # If the student is asking ABOUT the exam (META), the LLM should explain
     # briefly rather than strike. Inject the exam's own topic + skills so the
     # explanation is precise to this assessment, not a generic stock line.
-    topic = (_FLOW_SPEC.topic if _FLOW_SPEC else "this assessment").strip()
-    skills = (_FLOW_SPEC.skills_assessed if _FLOW_SPEC else []) or []
+    topic = (_fspec(fm).topic if _fspec(fm) else "this assessment").strip()
+    skills = (_fspec(fm).skills_assessed if _fspec(fm) else []) or []
     skills_str = "; ".join(skills) if skills else "reasoning and language use"
     meta_check = (
         f"META CHECK first: if the student is asking ABOUT the question "
@@ -1288,7 +1357,7 @@ async def handle_global_off_topic(
     # something even if Gemini Flash returns 0 completion tokens after the
     # function call (a known failure mode — see session 20260615_030219).
     name = flow_manager.state.get("name", "")
-    redirect_text = _off_topic_redirect_text(count - 1, name)
+    redirect_text = _off_topic_redirect_text(count - 1, name, flow_manager)
     if redirect_text:
         try:
             await flow_manager.task.queue_frame(TTSSpeakFrame(redirect_text))
@@ -1318,8 +1387,8 @@ async def handle_global_off_topic(
             "Off-topic during followup_probe with no cached gold — staying on node"
         )
         return ({"next_action": "wait_for_student"}, None)
-    if current in _PROBE_FACTORIES:
-        return ({"next_action": "wait_for_student"}, _PROBE_FACTORIES[current](flow_manager))
+    if current in _pfact(flow_manager):
+        return ({"next_action": "wait_for_student"}, _pfact(flow_manager)[current](flow_manager))
     # Unknown current_probe — DO NOT close the exam on a single strike. Stay
     # on the current node and let the LLM redirect the student back on topic.
     logger.warning(
@@ -1488,7 +1557,7 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
                 "naturally as follow-ups. Never deliver a big paragraph or "
                 "multiple questions at once. "
                 "Example: 'Wonderful! Here's our question: [the one core question]'\n"
-                f"THE EXAM QUESTION (shorten to its core if long): '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'\n"
+                f"THE EXAM QUESTION (shorten to its core if long): '{_fspec(flow_manager).exam_question if _fspec(flow_manager) else ''}'\n"
                 "For 'not_ready': a gentle reassurance."
             ),
         }],
@@ -1531,7 +1600,7 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
     respond_immediately=False, so this is the only LLM call that speaks.
     """
     candidate = flow_manager.state.get("name_candidate", "")
-    exam_question = _FLOW_SPEC.exam_question if _FLOW_SPEC else ""
+    exam_question = _fspec(flow_manager).exam_question if _fspec(flow_manager) else ""
     return NodeConfig(
         name="confirm_name",
         role_messages=[],  # seeded once in LLMContext at session start
@@ -1641,7 +1710,7 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
                         "description": (
                             "ONE flowing statement: confirm the recorded name warmly "
                             "(3-5 words) then immediately pose the exam question "
-                            f"verbatim: '{_FLOW_SPEC.exam_question if _FLOW_SPEC else ''}'"
+                            f"verbatim: '{_fspec(flow_manager).exam_question if _fspec(flow_manager) else ''}'"
                         ),
                     },
                 },
@@ -1656,10 +1725,10 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
 def create_opening_node(flow_manager: FlowManager, respond_immediately: bool = True) -> NodeConfig:
     name = flow_manager.state.get("name", "student")
     count = flow_manager.state.get("off_topic_count", 0)
-    if not _FLOW_SPEC:
-        raise RuntimeError("_FLOW_SPEC is None — flow was not initialised")
-    exam_question = _FLOW_SPEC.exam_question
-    available = [p.id for p in _FLOW_SPEC.probe_pool]
+    if not _fspec(flow_manager):
+        raise RuntimeError("_fspec(flow_manager) is None — flow was not initialised")
+    exam_question = _fspec(flow_manager).exam_question
+    available = [p.id for p in _fspec(flow_manager).probe_pool]
     time_notice = _time_notice_prefix(flow_manager)
     support_notice = _support_notice_prefix(flow_manager)
     no_repeat = _no_repeat_prefix(flow_manager)
@@ -1672,7 +1741,7 @@ def create_opening_node(flow_manager: FlowManager, respond_immediately: bool = T
             "role": "system",
             "content": (
                 f"{_state_block(flow_manager)}"
-                f"{_off_topic_instruction(count, name)}\n\n"
+                f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
                 f"{time_notice}{support_notice}{no_repeat}"
                 f"Ask {name} the following exam question, word for word:\n"
                 f"'{exam_question}'\n\n"
@@ -1763,14 +1832,15 @@ def _revisit_notice_prefix(flow_manager: FlowManager) -> str:
     )
 
 
-def _recent_examiner_openings(n: int = 3, max_words: int = 9) -> list[str]:
+def _recent_examiner_openings(n: int = 3, max_words: int = 9, fm=None) -> list[str]:
     """Return the opening ~max_words of the last `n` EXAMINER turns from the
     live transcript collector, deduplicated (case-insensitive). Used to feed
     back into the next probe so the LLM can see (and avoid) phrases it just
     used."""
-    if _CURRENT_TRANSCRIPT is None:
+    lt = (fm.state.get("live_transcript") if fm is not None else None) or _CURRENT_TRANSCRIPT
+    if lt is None:
         return []
-    examiner = [t["text"] for t in _CURRENT_TRANSCRIPT.turns if t["speaker"] == "EXAMINER"]
+    examiner = [t["text"] for t in lt.turns if t["speaker"] == "EXAMINER"]
     out: list[str] = []
     seen: set[str] = set()
     for text in reversed(examiner):
@@ -1792,7 +1862,7 @@ def _no_repeat_prefix(flow_manager: FlowManager) -> str:
     """Inject a 'do not reuse these openers' block into the next probe's
     task_messages, populated with the openings of the assistant's last few
     turns. Hard counter to the LLM's tendency to glom onto one phrasing."""
-    openings = _recent_examiner_openings()
+    openings = _recent_examiner_openings(fm=flow_manager)
     if not openings:
         return ""
     bullets = "\n".join(f"  • '{o}…'" for o in openings)
@@ -1831,7 +1901,7 @@ def create_dynamic_probe_node(
     name = flow_manager.state.get("name", "student")
     count = flow_manager.state.get("off_topic_count", 0)
     covered = set(flow_manager.state.get("covered_probes", []))
-    available = [p.id for p in _FLOW_SPEC.probe_pool if p.id not in covered]
+    available = [p.id for p in _fspec(flow_manager).probe_pool if p.id not in covered]
 
     instructions = render_probe_instructions(probe, name, available)
     time_notice = _time_notice_prefix(flow_manager)
@@ -1846,7 +1916,7 @@ def create_dynamic_probe_node(
             "role": "system",
             "content": (
                 f"{_state_block(flow_manager)}"
-                f"{_off_topic_instruction(count, name)}\n\n"
+                f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
                 f"{time_notice}{revisit_notice}{support_notice}{no_repeat}{instructions}"
             ),
         }],
@@ -1871,7 +1941,7 @@ def create_followup_probe_node(
     name = flow_manager.state.get("name", "student")
     count = flow_manager.state.get("off_topic_count", 0)
     covered = set(flow_manager.state.get("covered_probes", []))
-    available = [p.id for p in _FLOW_SPEC.probe_pool if p.id not in covered]
+    available = [p.id for p in _fspec(flow_manager).probe_pool if p.id not in covered]
     time_notice = _time_notice_prefix(flow_manager)
     support_notice = _support_notice_prefix(flow_manager)
     no_repeat = _no_repeat_prefix(flow_manager)
@@ -1883,7 +1953,7 @@ def create_followup_probe_node(
             "role": "system",
             "content": (
                 f"{_state_block(flow_manager)}"
-                f"{_off_topic_instruction(count, name)}\n\n"
+                f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
                 f"{time_notice}{support_notice}{no_repeat}"
                 f"{name} just said something worth following up on:\n"
                 f"'{gold_moment}'\n\n"
@@ -1951,7 +2021,7 @@ def _compute_time_state(flow_manager: FlowManager) -> dict:
     All times in seconds. If the budget or start time is missing, returns
     a permissive state (no warning, no force-close)."""
     started_iso = flow_manager.state.get("started_at_iso")
-    duration_min = (_FLOW_SPEC.duration_minutes if _FLOW_SPEC else None) or 6
+    duration_min = (_fspec(flow_manager).duration_minutes if _fspec(flow_manager) else None) or 6
     budget = duration_min * 60
     if not started_iso:
         return {
@@ -1993,12 +2063,12 @@ def _pick_revisit_probe(flow_manager: FlowManager) -> str | None:
     """Pick the covered probe with the lowest attempt count — the one that
     got least exploration first time around — as the revisit target.
     Returns None if no probe is suitable."""
-    if not _FLOW_SPEC:
+    if not _fspec(flow_manager):
         return None
     covered = set(flow_manager.state.get("covered_probes", []))
     attempts = flow_manager.state.get("probe_attempts", {})
     # Candidates: probes in the pool that were covered.
-    candidates = [(p.id, int(attempts.get(p.id, 0))) for p in _FLOW_SPEC.probe_pool if p.id in covered]
+    candidates = [(p.id, int(attempts.get(p.id, 0))) for p in _fspec(flow_manager).probe_pool if p.id in covered]
     if not candidates:
         return None
     # Sort by attempts ascending — least-explored probe gets revisited first.
@@ -2171,15 +2241,15 @@ async def handle_transition(
         next_id = sorted(missing_required)[0]
         logger.info(f"Required probe not yet covered: {next_id!r}")
         flow_manager.state.update({"current_probe": next_id})
-        return ({}, _PROBE_FACTORIES[next_id](flow_manager))
+        return ({}, _pfact(flow_manager)[next_id](flow_manager))
 
     recommended = args.get("recommended_next", "").strip()
-    if recommended and recommended not in covered and recommended in _PROBE_FACTORIES:
+    if recommended and recommended not in covered and recommended in _pfact(flow_manager):
         logger.info(f"Using LLM recommendation: {recommended!r}")
         flow_manager.state.update({"current_probe": recommended})
-        return ({}, _PROBE_FACTORIES[recommended](flow_manager))
+        return ({}, _pfact(flow_manager)[recommended](flow_manager))
 
-    remaining = [p.id for p in _FLOW_SPEC.probe_pool if p.id not in covered]
+    remaining = [p.id for p in _fspec(flow_manager).probe_pool if p.id not in covered]
     if not remaining:
         # All probes covered — but should we really close, or revisit?
         # Close only if we're past the 75% time-warning threshold OR we've
@@ -2212,12 +2282,12 @@ async def handle_transition(
             f"Time remains ({time_state['fraction']*100:.0f}% used) and probes exhausted "
             f"— REVISIT #{revisit_count + 1} on probe {revisit_id!r}"
         )
-        return ({}, _PROBE_FACTORIES[revisit_id](flow_manager))
+        return ({}, _pfact(flow_manager)[revisit_id](flow_manager))
 
     next_id = remaining[0]
     logger.info(f"Picking next uncovered probe: {next_id!r}")
     flow_manager.state.update({"current_probe": next_id})
-    return ({}, _PROBE_FACTORIES[next_id](flow_manager))
+    return ({}, _pfact(flow_manager)[next_id](flow_manager))
 
 
 # ─── Greeting routing handler ──────────────────────────────────────────────────
@@ -2318,6 +2388,30 @@ async def handle_begin_exam(
     node so the bot can reassure them and re-ask."""
     intent = args.get("intent", "ready")
     speak_text = args.get("speak", "").strip()
+
+    # Phantom-call guard — THE EXAMINER MUST GREET FIRST. The known-name greeting
+    # node fires respond_immediately on connect, but some models (notably Haiku
+    # 5.5) call begin_exam right then — before the student has said anything and
+    # WITHOUT speaking the greeting — which skips the whole greeting and jumps
+    # straight to the question. If begin_exam arrives with no student utterance
+    # yet, speak the greeting ourselves and STAY in the greeting node so the
+    # examiner opens the conversation and then waits for the student's reply.
+    if flow_manager.state.get("student_utterance_count", 0) == 0:
+        name = (flow_manager.state.get("name") or "there").strip() or "there"
+        greeting = (
+            f"Hello {name}! I'm your IB MYP oral examiner for today. This is a "
+            "short, relaxed discussion — there are no right or wrong answers, I "
+            "just want to hear your thoughts. Are you ready to begin?"
+        )
+        try:
+            await flow_manager.task.queue_frame(TTSSpeakFrame(greeting))
+            logger.info(
+                "begin_exam phantom-called before greeting; spoke greeting and "
+                "staying in greeting node to wait for the student."
+            )
+        except Exception as e:
+            logger.warning(f"greeting TTSSpeakFrame failed: {e}")
+        return ({"next_action": "wait_for_student"}, None)
 
     if speak_text:
         try:
@@ -2979,11 +3073,17 @@ class TranscriptCollector(FrameProcessor):
 _CURRENT_TRANSCRIPT: LiveTranscript | None = None
 
 
-def get_live_transcript() -> list[dict]:
-    """Server-facing accessor for the in-flight transcript."""
-    if _CURRENT_TRANSCRIPT is None:
+def get_live_transcript(session_id: str | None = None) -> list[dict]:
+    """Server-facing accessor for a session's in-flight transcript (by
+    session_id when given, else the single-session fallback)."""
+    lt = None
+    if session_id is not None and session_id in _LIVE_SESSIONS:
+        lt = _LIVE_SESSIONS[session_id]["transcript"]
+    if lt is None:
+        lt = _CURRENT_TRANSCRIPT
+    if lt is None:
         return []
-    return list(_CURRENT_TRANSCRIPT.turns)
+    return list(lt.turns)
 
 
 class ProbeAttemptCounter(FrameProcessor):
@@ -3256,6 +3356,18 @@ async def run_bot(
     use_turn_markers: str = "auto",
     enable_auto_summarization: bool = True,
 ):
+    # Capture THIS session's flow state into locals NOW, before any await. The
+    # module globals hold this exam's data at run_bot entry (set_active_flow ran
+    # synchronously just before), but a CONCURRENT exam could overwrite the
+    # globals the moment we await. We seed these onto flow_manager.state below,
+    # which pipecat makes available to every handler — so each exam reads its own
+    # state. (This is what makes concurrent exams in one process safe.)
+    _sess_flow_spec = _FLOW_SPEC
+    _sess_probe_factories = _PROBE_FACTORIES
+    _sess_required_probes = _REQUIRED_PROBES
+    _sess_custom_grading = _CUSTOM_GRADING_PROMPT
+    _sess_provided_name = _PROVIDED_STUDENT_NAME
+
     # Per-session log file — captures every loguru log line emitted during this
     # session so we can post-mortem any one run without scrolling stdout.
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3272,7 +3384,7 @@ async def run_bot(
         f"llm={llm_provider}:{llm_model} | stt={stt_provider}"
     )
 
-    keyterms = _extract_keyterms_from_flowspec(_FLOW_SPEC)
+    keyterms = _extract_keyterms_from_flowspec(_sess_flow_spec)
     stt = _build_stt(stt_provider, stt_language, keyterms=keyterms)
 
     cartesia_keys = _load_cartesia_keys()
@@ -3665,16 +3777,23 @@ async def run_bot(
         f"Auto-context summarization: {'ON (LLM compresses older turns at ~4K tokens)' if enable_auto_summarization else 'OFF (full transcript kept verbatim)'}"
     )
 
-    # Publish for /api/sessions/{id}/transcript polling
+    # Publish for /api/sessions/{id}/transcript polling. Use a LOCAL transcript
+    # object and register it per-session (keyed by session_id) so concurrent
+    # voice exams each expose their own; also keep the single-session globals as
+    # a fallback, and stash the transcript on flow_manager.state for in-exam
+    # readers (e.g. anti-repetition).
+    live_transcript = LiveTranscript()
+    _register_live_session(session_id, context, live_transcript)
+    flow_manager.state["live_transcript"] = live_transcript
     global _CURRENT_CONTEXT, _CURRENT_SESSION_ID, _CURRENT_TRANSCRIPT
     _CURRENT_CONTEXT = context
     _CURRENT_SESSION_ID = session_id
-    _CURRENT_TRANSCRIPT = LiveTranscript()
+    _CURRENT_TRANSCRIPT = live_transcript
     user_transcript_collector = TranscriptCollector(
-        _CURRENT_TRANSCRIPT, capture_user=True, capture_bot=False,
+        live_transcript, capture_user=True, capture_bot=False,
     )
     bot_transcript_collector = TranscriptCollector(
-        _CURRENT_TRANSCRIPT, capture_user=False, capture_bot=True,
+        live_transcript, capture_user=False, capture_bot=True,
     )
     rtvi = RTVIProcessor()
     audio_buffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
@@ -3800,6 +3919,18 @@ async def run_bot(
     )
     attempt_counter.attach(flow_manager)
 
+    # Seed THIS exam's flow state onto flow_manager.state (from the locals we
+    # captured at entry, not the possibly-racing globals). Every node builder and
+    # handler reads these via _fspec()/_pfact()/etc., so concurrent exams in one
+    # process each use their own state instead of clobbering module globals.
+    flow_manager.state.update({
+        "flow_spec": _sess_flow_spec,
+        "probe_factories": _sess_probe_factories,
+        "required_probes": _sess_required_probes,
+        "custom_grading_prompt": _sess_custom_grading,
+        "provided_student_name": _sess_provided_name,
+    })
+
     wav_path    = RECORDINGS_DIR / f"exam_{session_id}.wav"
     report_path = REPORTS_DIR    / f"report_{session_id}.json"
     started_at  = {"t": None}
@@ -3830,7 +3961,7 @@ async def run_bot(
         transcript_turns = _extract_transcript(context)
         node_trace = state.get("node_trace", [])
         budget_seconds = (
-            (_FLOW_SPEC.duration_minutes if _FLOW_SPEC else 6) * 60
+            (_sess_flow_spec.duration_minutes if _sess_flow_spec else 6) * 60
         )
         metadata = {
             "session_id": session_id,
@@ -3853,7 +3984,7 @@ async def run_bot(
         await grade_exam(
             wav_path, metadata, report_path,
             transcript_turns, node_trace, duration_s,
-            _FLOW_SPEC.exam_question, _FLOW_SPEC.topic,
+            _sess_flow_spec.exam_question, _sess_flow_spec.topic,
         )
 
     @transport.event_handler("on_client_connected")
@@ -3866,17 +3997,17 @@ async def run_bot(
             "started_at_iso": started_at["t"].isoformat(timespec="seconds"),
         })
         await audio_buffer.start_recording()
-        if _PROVIDED_STUDENT_NAME:
-            flow_manager.state.update({"name": _PROVIDED_STUDENT_NAME})
+        if _sess_provided_name:
+            flow_manager.state.update({"name": _sess_provided_name})
             logger.info(
-                f"Using prefilled student name {_PROVIDED_STUDENT_NAME!r}; "
+                f"Using prefilled student name {_sess_provided_name!r}; "
                 "skipping STT name capture."
             )
             await flow_manager.initialize(
                 create_known_name_greeting_node(flow_manager)
             )
         else:
-            await flow_manager.initialize(create_greeting_node())
+            await flow_manager.initialize(create_greeting_node(flow_manager))
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -3987,6 +4118,9 @@ async def run_bot(
             logger.info(f"Transcript snapshot saved → {snapshot_path}")
         except Exception:
             logger.exception("Failed to write transcript snapshot")
+        # Drop this session's live-transcript registry entry (the report file is
+        # canonical from here on) so the registry doesn't accumulate.
+        _unregister_live_session(session_id)
         # Detach the per-session log sink so the next session opens a fresh file.
         try:
             logger.remove(_session_log_sink_id)

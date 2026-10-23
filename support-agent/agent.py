@@ -499,11 +499,15 @@ async def entrypoint(ctx: JobContext):
     # assessment they want instead.
     if spec:
         opening = (
-            "Greet the student warmly by name, say you can see them on camera, "
-            "briefly restate the exam task in one sentence, and invite them to "
-            "begin. Say this ONCE, in two or three sentences, then stop and wait "
-            "for their response. Do NOT repeat yourself or re-ask. Do NOT claim "
-            "to see any diagram, apparatus, or work yet — they haven't shown it."
+            "This is your OPENING GREETING — make it a proper, warm welcome "
+            "(your strict, evaluative manner starts AFTER this, once questioning "
+            "begins). In 3-4 short sentences: (1) greet the student warmly by "
+            "name and welcome them; (2) say you are their IB examiner for today "
+            "and you can see them on camera; (3) briefly reassure them this is a "
+            "calm discussion; (4) state the exam task in ONE clear sentence and "
+            "invite them to begin. Say this ONCE, then stop and wait for their "
+            "response. Do NOT repeat yourself or re-ask. Do NOT claim to see any "
+            "diagram, apparatus, or work yet — they haven't shown it."
         )
     else:
         opening = (

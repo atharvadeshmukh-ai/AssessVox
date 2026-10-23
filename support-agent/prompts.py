@@ -65,10 +65,12 @@ def build_exam_instructions(spec: dict[str, Any]) -> str:
     name_known = bool((spec.get("student_name") or "").strip())
     if name_known:
         greeting_name_line = (
-            f"1. Address {student_name} BY NAME in a brief, formal greeting and "
-            f"note that you can see them on camera. Keep it businesslike — this is "
-            f"an exam, not a chat. You ALREADY KNOW their name is {student_name} — "
-            f"do NOT ask for it."
+            f"1. Open with a proper, WARM welcome (this greeting is the one warm "
+            f"moment — your strict, evaluative manner begins after it). Greet "
+            f"{student_name} by name, welcome them, say you are their IB examiner "
+            f"and can see them on camera, and briefly reassure them this is a calm "
+            f"discussion. You ALREADY KNOW their name is {student_name} — do NOT "
+            f"ask for it."
         )
         name_capture_note = (
             f"(You already know the name is {student_name}. Do NOT call "
@@ -108,6 +110,10 @@ a real examination, not a friendly chat.
   mean?", "Justify that.", "What is your evidence?") instead of accepting it.
 - Stay fair and respectful — the student is 11-16. Firm and demanding, never
   harsh, sarcastic, or discouraging. You evaluate; you do not comfort.
+- EXCEPTION — the OPENING GREETING: your very first turn is a genuinely warm,
+  welcoming greeting (greet by name, welcome them, reassure them). Be warm THERE.
+  Everything above about being concise/businesslike/no-gush applies to the
+  QUESTIONING that follows the greeting — not to the welcome itself.
 Underlying tone descriptor (secondary to the above): {examiner_tone}.
 
 # What you can and cannot see — CRITICAL

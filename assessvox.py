@@ -887,14 +887,16 @@ async def get_session_transcript(session_id: str):
     if _SESSIONS[session_id].get("requires_video"):
         return {"turns": _SESSIONS[session_id].get("video_transcript", []), "final": False}
 
-    # 2. Live frame-level collector (most up-to-date during the call)
-    if dynamic_exam._CURRENT_SESSION_ID == session_id:
+    # 2. Live frame-level collector — per-session registry (so CONCURRENT voice
+    # exams each get their OWN live transcript), falling back to the single-
+    # session globals.
+    if session_id in dynamic_exam._LIVE_SESSIONS or dynamic_exam._CURRENT_SESSION_ID == session_id:
         latency = dynamic_exam.get_last_turn_latency()
-        live = dynamic_exam.get_live_transcript()
+        live = dynamic_exam.get_live_transcript(session_id)
         if live:
             return {"turns": live, "final": False, "last_turn_latency": latency}
         # 3. Fall back to LLMContext if collector empty (e.g. before STT)
-        ctx_turns = dynamic_exam.get_current_transcript()
+        ctx_turns = dynamic_exam.get_current_transcript(session_id)
         return {"turns": ctx_turns, "final": False, "last_turn_latency": latency}
 
     return {"turns": [], "final": False, "last_turn_latency": None}

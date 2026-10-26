@@ -1,0 +1,131 @@
+{
+  "programme": "MYP",
+  "subject": "Language Acquisition",
+  "level": "Phase 3-5",
+  "id": "myp-language-acquisition-listen-respond",
+  "assessment_type": "Listening and Speaking Assessment",
+  "display_name": "MYP Language Acquisition — Listen and respond",
+  "description": "4-6 min task. The examiner reads a short spoken message aloud (voicemail, announcement, radio clip…), asks about its main idea and details, then invites a personal response. Aligned to MYP Criterion A (Listening) and Criterion C (Speaking).",
+  "flow_spec": {
+    "topic": "MYP Language Acquisition listen and respond",
+    "exam_question": "Listen to a voicemail from a friend about a change of weekend plans, then explain what changed and how you would reply.",
+    "duration_minutes": 6,
+    "examiner_tone": "warm, clear and encouraging; age-appropriate for an 11-16 year old MYP student",
+    "skills_assessed": [
+      "Understanding the main idea of a spoken message",
+      "Picking out specific details accurately",
+      "Responding personally with reasons",
+      "Engaging in spontaneous interaction"
+    ],
+    "redirect_when_off_topic": "That's interesting — let's go back to the message.",
+    "question_style": "listen_respond",
+    "required_probes": [
+      "main_idea",
+      "key_details",
+      "personal_response"
+    ],
+    "probe_pool": [
+      {
+        "id": "main_idea",
+        "type": "question",
+        "prompt": "If not already covered, ask about the main purpose of the message: who it is from and why they are sending it.",
+        "scaffold": "Who was the message from, and what was it mostly about?"
+      },
+      {
+        "id": "key_details",
+        "type": "question",
+        "prompt": "Ask about one or two specific details from the MESSAGE AS READ ALOUD (a time, a place, something to bring, a number). Check the answer against the message; do not give the answer away.",
+        "scaffold": "Do you remember what time they mentioned?"
+      },
+      {
+        "id": "personal_response",
+        "type": "question",
+        "prompt": "Ask how the student would respond or what they would do next (e.g. how they would reply, whether they would go), with a reason.",
+        "scaffold": "If you got this message, what would you say back?"
+      },
+      {
+        "id": "own_experience",
+        "type": "example",
+        "prompt": "Ask for a similar situation from the student's own life — something like what happened in the message.",
+        "scaffold": "Has something like this ever happened to you?"
+      },
+      {
+        "id": "compare_own",
+        "type": "comparison",
+        "prompt": "Ask the student to compare the situation in the message with their own school, town or culture.",
+        "scaffold": "Is it the same or different where you live?"
+      },
+      {
+        "id": "wider_opinion",
+        "type": "question",
+        "prompt": "Widen out: ask the student's opinion on the general topic behind the message, with a reason.",
+        "scaffold": "In general, what do you think about this?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student used a vague word ('thing', 'stuff', 'good'), ask them to be more precise about what they mean.",
+        "scaffold": "When you say [vague term], what exactly do you mean?"
+      }
+    ],
+    "opening_script": "Listen carefully to this voicemail from your friend Maya. Here it is. \"Hi, it's Maya! Bad news — the concert on Saturday is cancelled because the singer is ill. But I've got another idea. Let's go to the science museum instead, and then have lunch at the pizza place next to it. Can we meet at eleven at the train station, not at ten? Bring about fifteen euros for the ticket and lunch. Call me back tonight and tell me if you can come!\" Okay. So, what has changed about Saturday, and what does Maya want you to do?",
+    "examiner_brief": "Key facts: concert cancelled (singer ill); new plan = science museum + lunch at the pizza place next to it; meet at 11 (not 10) at the train station; bring about 15 euros; call Maya back tonight."
+  },
+  "questions": [
+    {
+      "id": "lr-voicemail-weekend",
+      "theme": "Free time",
+      "label": "Voicemail: change of weekend plans",
+      "prompt": "Listen to a voicemail from a friend about a change of weekend plans, then explain what changed and how you would reply.",
+      "opening_script": "Listen carefully to this voicemail from your friend Maya. Here it is. \"Hi, it's Maya! Bad news — the concert on Saturday is cancelled because the singer is ill. But I've got another idea. Let's go to the science museum instead, and then have lunch at the pizza place next to it. Can we meet at eleven at the train station, not at ten? Bring about fifteen euros for the ticket and lunch. Call me back tonight and tell me if you can come!\" Okay. So, what has changed about Saturday, and what does Maya want you to do?",
+      "examiner_brief": "Key facts: concert cancelled (singer ill); new plan = science museum + lunch at the pizza place next to it; meet at 11 (not 10) at the train station; bring about 15 euros; call Maya back tonight.",
+      "notes": "Everyday language; times, places, money."
+    },
+    {
+      "id": "lr-school-trip",
+      "theme": "School",
+      "label": "Announcement: school trip changes",
+      "prompt": "Listen to a school announcement about a class trip, then explain what students must do and give your opinion of the trip.",
+      "opening_script": "Listen carefully to this school announcement. Here it is. \"Good morning, Year 9. The trip to the national park has moved from Thursday to next Monday. The bus leaves at eight fifteen, so please arrive at school by eight. Bring a packed lunch, a water bottle and comfortable shoes — no sandals. Remember to hand in your signed permission form to your form tutor by Friday. If it rains, we will visit the nature centre instead. Thank you.\" Okay. So, what do students need to do before the trip?",
+      "examiner_brief": "Key facts: trip to the national park moved from Thursday to next Monday; bus at 8:15, arrive by 8:00; bring packed lunch, water bottle, comfortable shoes (no sandals); signed permission form to form tutor by Friday; if it rains, nature centre instead.",
+      "notes": "Instructions, dates and times."
+    },
+    {
+      "id": "lr-bike-scheme",
+      "theme": "Local area",
+      "label": "Local news: new bike-sharing scheme",
+      "prompt": "Listen to a local news report about a new bike-sharing scheme, then explain how it works and whether it would work in your town.",
+      "opening_script": "Listen carefully to this local news report. Here it is. \"From next month, the city is starting a new bike-sharing scheme. There will be two hundred bikes at twenty stations across the city, including the main square and the university. You can rent a bike with a phone app. The first thirty minutes are free, and after that it costs one euro per hour. Riders must be at least sixteen, and helmets are recommended but not required. The city hopes the scheme will reduce traffic in the centre.\" Okay. So, what is the new scheme, and who can use it?",
+      "examiner_brief": "Key facts: starts next month; 200 bikes, 20 stations (incl. main square and university); rent with a phone app; first 30 minutes free, then 1 euro per hour; minimum age 16; helmets recommended, not required; aim: reduce traffic in the centre.",
+      "notes": "Numbers and rules; links to environment and transport."
+    },
+    {
+      "id": "lr-teen-sleep",
+      "theme": "Health",
+      "label": "Podcast: why teenagers need sleep",
+      "prompt": "Listen to a short podcast clip about teenagers and sleep, then explain the speaker's main points and give your own view.",
+      "opening_script": "Listen carefully to this short clip from a health podcast. Here it is. \"Teenagers need between eight and ten hours of sleep a night, but most get less than seven. One big reason is phones: the light from screens tells your brain it's still daytime, so you feel awake for longer. Another reason is that teenagers' body clocks naturally shift later, but school still starts early. My top tip? Put your phone in another room thirty minutes before bed, and try to go to sleep at the same time every night — even at weekends.\" Okay. So, according to the speaker, why do many teenagers not get enough sleep?",
+      "examiner_brief": "Key facts: teens need 8-10 hours, most get under 7; reason 1: screen light makes the brain think it's daytime; reason 2: teenage body clocks shift later but school starts early; tips: phone in another room 30 minutes before bed, same bedtime every night including weekends.",
+      "notes": "Cause and effect, giving advice; relatable topic."
+    },
+    {
+      "id": "lr-coach-message",
+      "theme": "Sport",
+      "label": "Voicemail: message from the coach",
+      "prompt": "Listen to a voicemail from a sports coach about changes to a match, then explain the changes and how you would respond.",
+      "opening_script": "Listen carefully to this voicemail from your football coach. Here it is. \"Hi everyone, it's Coach Daniel. Saturday's match is now an away game, because the home pitch is being repaired. We'll play at Riverside School instead. The match starts at two, but we'll meet at the school car park at twelve thirty. Please bring your full kit, shin pads, and a snack. If your parents can drive two or three players, please let me know by Thursday. See you there!\" Okay. So, what has changed, and what does the coach ask you to bring?",
+      "examiner_brief": "Key facts: match now away (home pitch being repaired); at Riverside School; starts at 2:00, meet at school car park at 12:30; bring full kit, shin pads, a snack; parents who can drive 2-3 players should tell the coach by Thursday.",
+      "notes": "Times, places, organising transport."
+    },
+    {
+      "id": "lr-volunteer-advert",
+      "theme": "Community",
+      "label": "Radio advert: beach clean-up volunteers",
+      "prompt": "Listen to a radio advert asking for volunteers, then explain the event and whether you would take part.",
+      "opening_script": "Listen carefully to this radio advert. Here it is. \"Want to help your local beach? Join our community clean-up this Sunday from nine until twelve at North Beach. We'll give you gloves and bags — just bring sun cream and a hat. Everyone who helps gets a free lunch and a volunteer certificate, which looks great for school. Under-fourteens must come with an adult. Sign up on the community centre website before Friday. Let's make our beach beautiful again!\" Okay. So, what is the event, and what do volunteers get?",
+      "examiner_brief": "Key facts: beach clean-up this Sunday, 9 to 12, North Beach; gloves and bags provided, bring sun cream and a hat; volunteers get free lunch + volunteer certificate; under-14s must come with an adult; sign up on the community centre website before Friday.",
+      "notes": "Links to Sharing the Planet / environment; persuasion."
+    }
+  ],
+  "grading_rubric": "You are an IB MYP Language Acquisition evaluator producing a HOLISTIC report on a 4-6 minute LISTEN-AND-RESPOND assessment (MYP Criterion A: Listening and Criterion C: Speaking). Do not grade turn-by-turn — read the whole exam, then write one integrated judgment per dimension.\n\nTwo voices: AI EXAMINER and STUDENT. At the start the examiner read a short spoken message aloud (the first EXAMINER turns of the transcript contain it word for word). The student then answered questions about it and responded personally. Grade ONLY the student.\n\nTask:\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nHOW TO READ THE DIMENSIONS FOR LISTEN-AND-RESPOND:\n  clarity       — LISTENING: did the student correctly understand the main idea AND specific details of the message? Check every claim against the message text in the transcript; misunderstandings lower this score.\n  reasoning     — do they justify their personal response or opinion with reasons?\n  examples      — do they recall accurate specific details from the message and add relevant examples of their own?\n  engagement    — do they interact naturally, ask for clarification appropriately, keep the conversation going?\n  fluency, pronunciation, confidence — as usual for spoken interaction.\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript — authoritative source for evidence:\n{transcript}\n\nNode trace (which probes were reached):\n{node_trace}\n\nDIMENSIONS — each scored 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery)\n{dimension_guide}\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the whole exam\n  - evidence: 1-3 short student quotes from the transcript. Never quote the examiner. Never write \"Entire recording\".\n\nThen produce:\n  - headline: one sentence (≤ 20 words) overall impression\n  - summary:  4-6 sentence holistic narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps\n  - overall_score: 0-100 (weigh clarity (listening comprehension) and fluency most heavily). If metadata.cancelled is true, set to 0 and set every dimension to 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n"
+}

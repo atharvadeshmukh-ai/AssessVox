@@ -519,6 +519,80 @@ async def entrypoint(ctx: JobContext):
         )
     await session.generate_reply(instructions=opening)
 
+    # Pacing. Gemini Live has no sense of elapsed time, so it is told how much
+    # time is left at a few checkpoints and paces its own questions — the exam
+    # ends naturally at a question boundary, never mid-answer:
+    #   50%, 75%      → TIME NOTICE: minutes left, roughly how many questions
+    #   budget - 30s  → TIME NOTICE: no new questions; close after this answer
+    #   then, once the student has finished and nobody is talking, prompt the
+    #   closing if the model is just waiting (or 2 min over budget regardless)
+    budget = float((spec or {}).get("duration_minutes") or 10) * 60
+    close_reserve = 30.0
+    failsafe = 120.0
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+
+    async def _time_notice(text: str) -> None:
+        base = agent.instructions.split("\n\n# TIME NOTICE")[0]
+        await agent.update_instructions(f"{base}\n\n# TIME NOTICE\n{text}")
+
+    async def _exam_clock() -> None:
+        try:
+            for frac in (0.5, 0.75):
+                await asyncio.sleep(max(0.0, t0 + budget * frac - loop.time()))
+                if agent._exam_ended:
+                    return
+                left = budget - close_reserve - (loop.time() - t0)
+                n_left = max(1, round(left / 75))
+                logger.info(f"Pacing: {left:.0f}s left, ~{n_left} question(s)")
+                await _time_notice(
+                    f"About {left / 60:.1f} minutes of questioning remain — "
+                    f"roughly {n_left} more question(s). Pace yourself so the "
+                    "discussion ends on time; at most one short follow-up per "
+                    "question. Don't mention the time to the student."
+                )
+            await asyncio.sleep(max(0.0, t0 + budget - close_reserve - loop.time()))
+            if agent._exam_ended:
+                return
+            logger.info("Pacing: exam time reached — closing after this answer")
+            await _time_notice(
+                "TIME IS UP. Do NOT ask any new question. When the student "
+                "finishes their current answer, thank them warmly in one or two "
+                "short sentences, then call end_exam with reason='time_up'."
+            )
+            # If the student has finished and the model is just waiting, prompt
+            # the closing ourselves (two quiet polls in a row = turn is over).
+            quiet = 0
+            while not agent._exam_ended:
+                await asyncio.sleep(2)
+                over = loop.time() - t0 - budget
+                if (str(session.agent_state) == "listening"
+                        and str(session.user_state) != "speaking"):
+                    quiet += 1
+                else:
+                    quiet = 0
+                if quiet >= 2 or over >= failsafe:
+                    logger.info(f"Pacing: prompting closing (quiet={quiet}, over={over:.0f}s)")
+                    await session.generate_reply(instructions=(
+                        "The exam time is up. Thank the student warmly in one or "
+                        "two short sentences, ask NO further questions, then call "
+                        "end_exam with reason='time_up'."
+                    ))
+                    break
+            # The closing has been spoken; if the model never called end_exam,
+            # end it ourselves (end_exam waits for any speech to finish).
+            await asyncio.sleep(45)
+            if not agent._exam_ended:
+                logger.warning("Pacing: end_exam never called after closing — ending")
+                await agent.end_exam("time_up", "")
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("exam clock failed")
+
+    if spec:
+        agent._clock_task = asyncio.create_task(_exam_clock())
+
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(

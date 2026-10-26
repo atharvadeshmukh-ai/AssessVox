@@ -22,3 +22,15 @@ class FlowSpec(BaseModel):
     )
     required_probes: list[str] = Field(default_factory=list)
     probe_pool: list[ProbeNode] = Field(default_factory=list)
+    # Exam format. "discussion" = opinion question (default). For "role_play"
+    # and "listen_respond", `opening_script` is read aloud word for word to start
+    # the exam (scenario + first in-character line, or the listening message +
+    # first question), and `examiner_brief` is private guidance kept in front of
+    # the examiner for the whole exam (character, passage text, etc.).
+    question_style: Literal["discussion", "role_play", "listen_respond"] = "discussion"
+    opening_script: str = ""
+    examiner_brief: str = ""
+    # Accurate description of the picture shown to the student (image
+    # questions). Private: the examiner uses it to check the student's
+    # description and the grader to judge accuracy — it is never read aloud.
+    image_description: str = ""

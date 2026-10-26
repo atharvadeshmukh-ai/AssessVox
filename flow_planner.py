@@ -9,6 +9,19 @@ from loguru import logger
 
 from flow_spec_schema import FlowSpec
 
+# Pacing model shared with the live examiner (dynamic_exam): each question —
+# ask, answer, at most one short follow-up — takes ~75s, plus ~60s for the
+# greeting and closing. The planner sizes the probe pool to this so the
+# conversation naturally fills the requested duration.
+SECS_PER_QUESTION = float(os.getenv("EXAM_SECS_PER_QUESTION", "75"))
+EXAM_OVERHEAD_SECS = 60
+
+
+def planned_question_count(duration_minutes: float) -> int:
+    """How many questions (opening question + probes) fit the duration."""
+    return max(2, round((duration_minutes * 60 - EXAM_OVERHEAD_SECS) / SECS_PER_QUESTION))
+
+
 PLANNER_PROMPT = """
 You are designing an IB MYP oral exam conversation flow.
 
@@ -41,7 +54,15 @@ Rules:
   instructions like "be ready to defend...", "engage with... too", or
   "consider both X and Y" — those belong in the probes, not the opening
   question. The student should hear one clear, answerable question.
-- Include 5-7 probes in probe_pool covering different angles of the topic
+- Include EXACTLY {n_probes} probes in probe_pool covering different angles of the
+  topic. This count is sized so the exam fills {duration} minutes: each probe is
+  about 75 seconds of conversation (one question, the answer, at most one short
+  follow-up), so each probe must be answerable in that time
+- Every probe must target information NO other probe asks for. No two probes may
+  be the same question reworded (e.g. "why did you choose X" and "what motivated
+  you to pick X" are duplicates — keep only one). No probe may re-ask the
+  exam_question itself; probes go beyond it (evidence, counterpoint, comparison,
+  limitation, consequence, precision)
 - required_probes: exactly 2 probe IDs that MUST be covered in every session
 - precision probe type must appear exactly once and should be last in the pool
 - prompt is an instruction to the AI examiner, NOT the actual words to say to the student
@@ -74,7 +95,10 @@ async def generate_flow(topic: str, duration: int = 6) -> FlowSpec:
 
     logger.info(f"Generating flow for topic: {topic!r}")
 
-    prompt = PLANNER_PROMPT.format(topic=topic, duration=duration)
+    # Questions after the opening one, plus a spare so the examiner can skip a
+    # probe that doesn't fit; clamped to flow_validator's 3-10 range.
+    n_probes = min(10, max(3, planned_question_count(duration)))
+    prompt = PLANNER_PROMPT.format(topic=topic, duration=duration, n_probes=n_probes)
     spec: FlowSpec | None = None
     # One regeneration attempt if the opening question comes back too long or
     # compound. We nudge the second call with an explicit, stronger constraint.

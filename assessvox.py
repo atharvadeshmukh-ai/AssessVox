@@ -396,6 +396,12 @@ async def create_session(req: CreateSessionRequest):
         image_url: str | None = None
         requires_video: bool = False
         template_video_rubric: str | None = None
+        # No question picked and no custom text: for picture-based templates,
+        # use the first picture question so the default always has its image.
+        if not question_id and not question_text_override:
+            first_img = next((q for q in tpl.questions if q.get("image_url")), None)
+            if first_img:
+                question_id = first_img["id"]
         if question_id:
             q = tpl.get_question(question_id)
             if q is None:
@@ -416,7 +422,10 @@ async def create_session(req: CreateSessionRequest):
             f"question={question_text_override or '(template default)'!r}"
         )
         try:
-            flow_spec = tpl.build_flow_spec(question_override=question_text_override)
+            flow_spec = tpl.build_flow_spec(
+                question_override=question_text_override,
+                question=tpl.get_question(question_id) if question_id else None,
+            )
             validate_flow_spec(flow_spec)
         except FlowValidationError as e:
             raise HTTPException(
@@ -426,8 +435,10 @@ async def create_session(req: CreateSessionRequest):
             )
         template_grading_rubric = tpl.grading_rubric
         template_video_rubric = getattr(tpl, "video_grading_rubric", None)
-        # Template-defined duration is the canonical one; req.duration_minutes
-        # is only honoured for the custom (LLM) path.
+        # The UI pre-fills the template's duration but lets the teacher edit
+        # it, so the requested duration wins over the template default.
+        if req.duration_minutes and req.duration_minutes != flow_spec.duration_minutes:
+            flow_spec = flow_spec.model_copy(update={"duration_minutes": req.duration_minutes})
         duration_minutes = flow_spec.duration_minutes
     else:
         # ─── Legacy LLM-generated path ─────────────────────────────────────
@@ -477,6 +488,7 @@ async def create_session(req: CreateSessionRequest):
         "duration_minutes": duration_minutes,
         "custom_grading_prompt": custom_prompt,
         "template_id": template_id,
+        "programme": tpl.programme if template_id else None,
         "student_name": (req.student_name or "").strip() or None,
         "flow_spec": flow_spec,
         "status": "ready",
@@ -983,6 +995,7 @@ async def _bot_for_session(connection: SmallWebRTCConnection, session_id: str) -
             flow_spec=s["flow_spec"],
             custom_grading_prompt=s.get("custom_grading_prompt"),
             student_name=s.get("student_name"),
+            programme=s.get("programme"),
             llm_provider=s.get("llm_provider", DEFAULT_LLM_PROVIDER),
             llm_model=s.get("llm_model", DEFAULT_LLM_MODEL),
             stt_provider=s.get("stt_provider", "cartesia-ink-2"),

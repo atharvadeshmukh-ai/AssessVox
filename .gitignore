@@ -213,6 +213,7 @@ flows/
 logs/
 transcripts/
 llm_calls/
+usage/
 
 # macOS clutter
 .DS_Store

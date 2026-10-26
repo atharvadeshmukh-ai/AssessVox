@@ -19,6 +19,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
     "ruff~=0.12.1",
 ]
 
@@ -26,3 +27,7 @@ dev = [
 line-length = 100
 [tool.ruff.lint]
 select = ["I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

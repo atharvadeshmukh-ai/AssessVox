@@ -73,7 +73,11 @@ class Template:
                 return q
         return None
 
-    def build_flow_spec(self, question_override: str | None = None) -> FlowSpec:
+    def build_flow_spec(
+        self,
+        question_override: str | None = None,
+        question: dict[str, Any] | None = None,
+    ) -> FlowSpec:
         """Return a FlowSpec, optionally overriding the exam question.
 
         Resolution order for the exam_question that ends up in the FlowSpec:
@@ -81,11 +85,24 @@ class Template:
              either a library question's prompt, or a custom teacher text).
           2. `flow_spec.exam_question` (the template's built-in default).
         Probe pool, required probes, examiner tone, and the redirect line
-        always stay from the template.
+        always stay from the template. A library `question` may also carry its
+        own `opening_script` / `examiner_brief` (role-play and listen-and-
+        respond formats), which replace the template defaults.
         """
-        if not question_override or not question_override.strip():
-            return self.flow_spec.model_copy(deep=True)
-        return self.flow_spec.model_copy(update={"exam_question": question_override.strip()})
+        update: dict[str, Any] = {}
+        if question_override and question_override.strip():
+            update["exam_question"] = question_override.strip()
+            # Custom teacher text: the template's default script belongs to the
+            # default question, so drop it and let the examiner introduce the
+            # custom task itself.
+            if question is None and update["exam_question"] != self.flow_spec.exam_question.strip():
+                update["opening_script"] = ""
+                update["examiner_brief"] = ""
+                update["image_description"] = ""
+        for key in ("opening_script", "examiner_brief", "image_description"):
+            if question and question.get(key):
+                update[key] = question[key].strip()
+        return self.flow_spec.model_copy(deep=True, update=update)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe shape for the /api/templates endpoint."""

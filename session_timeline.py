@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pricing import session_cost
+
 LOGS_DIR = Path(__file__).parent / "logs"
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
 FLOWS_DIR = Path(__file__).parent / "flows"
@@ -151,6 +153,7 @@ class SessionTimeline:
     has_report: bool = False
     is_complete: bool = False
     has_raw_calls: bool = False
+    cost: dict[str, Any] | None = None   # see pricing.session_cost
 
 
 # ─── Log scanning ─────────────────────────────────────────────────────────────
@@ -561,7 +564,31 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
         "min_v2v_ms": min(v2vs) if v2vs else None,
         "summarization_count": len(timeline.summarization_events),
     }
+    timeline.summary["duration_seconds"] = _session_duration(
+        report_path, timeline.started_at, timeline.ended_at
+    )
+    timeline.cost = session_cost(session_id, log_path)
     return timeline
+
+
+def _session_duration(report_path: Path, started_at: str | None, ended_at: str | None) -> float | None:
+    """Seconds the session was live. Prefers the report's duration (student
+    connected → call ended); falls back to bot start → transcript snapshot,
+    which also includes grading time."""
+    if report_path.exists():
+        try:
+            meta = json.loads(report_path.read_text(encoding="utf-8")).get("metadata") or {}
+            if meta.get("duration_seconds"):
+                return float(meta["duration_seconds"])
+        except Exception:
+            pass
+    if started_at and ended_at:
+        try:
+            start = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S.%f")
+            return max((datetime.fromisoformat(ended_at) - start).total_seconds(), 0.0)
+        except ValueError:
+            pass
+    return None
 
 
 def timeline_to_dict(t: SessionTimeline) -> dict[str, Any]:

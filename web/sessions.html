@@ -136,6 +136,23 @@
     .section {
       margin-bottom: 26px;
     }
+
+    /* ─── Cost breakdown ───────────────────────────────────────────────── */
+    .cost-table {
+      width: 100%; border-collapse: collapse; font-size: 12px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    }
+    .cost-table th, .cost-table td {
+      padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border);
+    }
+    .cost-table th {
+      font-size: 9px; font-weight: 600; letter-spacing: 1.2px;
+      color: var(--muted-2); text-transform: uppercase;
+    }
+    .cost-table td.usd, .cost-table th.usd { text-align: right; font-variant-numeric: tabular-nums; }
+    .cost-table td.model, .cost-table td.qty { color: var(--muted-2); }
+    .cost-table tr.total td { font-weight: 600; border-bottom: none; }
+    .cost-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
     .section h2 {
       font-size: 10px; font-weight: 600; letter-spacing: 1.8px;
       color: var(--muted-2); text-transform: uppercase;
@@ -565,6 +582,10 @@ function renderDetail(t) {
     ` : ''}
 
     <div class="summary">
+      <div class="stat"><div class="label">Session time</div>
+        <div class="value">${fmtDuration(summary.duration_seconds)}</div></div>
+      <div class="stat"><div class="label">Total cost</div>
+        <div class="value">${fmtUsd(t.cost && t.cost.total_usd)}</div></div>
       <div class="stat"><div class="label">Turns</div><div class="value">${summary.turn_count ?? '—'}</div></div>
       <div class="stat"><div class="label">Median V2V</div>
         <div class="value ${v2vClass(summary.median_v2v_ms)}">${fmtMs(summary.median_v2v_ms)}</div></div>
@@ -579,6 +600,8 @@ function renderDetail(t) {
       <div class="stat"><div class="label">Summarizations</div>
         <div class="value ${summary.summarization_count > 0 ? 'warn' : ''}">${summary.summarization_count ?? 0}</div></div>
     </div>
+
+    ${renderCost(t.cost)}
 
     <div class="section">
       <h2>Voice-to-voice latency per turn</h2>
@@ -605,6 +628,53 @@ function renderDetail(t) {
   renderLatencyChart(t);
   renderNodeGraph(t);
   renderTurns(t);
+}
+
+function fmtDuration(secs) {
+  if (secs == null) return '—';
+  const s = Math.round(secs);
+  const m = Math.floor(s / 60);
+  return m ? `${m}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
+
+function fmtUsd(v) {
+  if (v == null) return '—';
+  // Single exams cost fractions of a cent per line — show enough precision.
+  return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(3)}`;
+}
+
+function renderCost(cost) {
+  if (!cost || !(cost.lines || []).length) {
+    return `<div class="section"><h2>Cost breakdown</h2>
+      <div class="no-data">No usage recorded for this session.</div></div>`;
+  }
+  const rows = cost.lines.map(l => `
+    <tr>
+      <td>${esc(l.label)}</td>
+      <td class="model">${esc(l.model)}</td>
+      <td class="qty">${esc(l.quantity)}</td>
+      <td class="usd">${l.usd == null ? 'no price set' : fmtUsd(l.usd)}</td>
+    </tr>`).join('');
+  const notes = [];
+  if (cost.source === 'log_estimate') {
+    notes.push('Estimated from the session log (older run). If another exam was running at the same time its usage may be included.');
+  }
+  if ((cost.unpriced || []).length) {
+    notes.push(`No price set for: ${cost.unpriced.map(esc).join(', ')} — left out of the total (edit pricing.py).`);
+  }
+  notes.push('Based on public list prices in pricing.py.');
+  return `
+    <div class="section">
+      <h2>Cost breakdown</h2>
+      <table class="cost-table">
+        <thead><tr><th>Service</th><th>Model</th><th>Usage</th><th class="usd">Cost (USD)</th></tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="total"><td colspan="3">Total</td><td class="usd">${fmtUsd(cost.total_usd)}</td></tr>
+        </tbody>
+      </table>
+      <div class="cost-note">${notes.join('<br>')}</div>
+    </div>`;
 }
 
 function renderLatencyChart(t) {

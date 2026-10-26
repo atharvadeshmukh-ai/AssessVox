@@ -1,0 +1,125 @@
+{
+  "programme": "MYP",
+  "subject": "Language Acquisition",
+  "level": "Phase 3-5",
+  "id": "myp-language-acquisition-role-play",
+  "assessment_type": "Role-play Speaking Assessment",
+  "display_name": "MYP Language Acquisition — Role-play",
+  "description": "4-6 min role-play. The examiner plays a character in a real-life situation (shop, station, clinic…) and the student must achieve a goal through conversation — explaining, asking questions and handling a complication. Aligned to MYP Criterion C (Speaking).",
+  "flow_spec": {
+    "topic": "MYP Language Acquisition role-play",
+    "exam_question": "Role-play: the student returns a jacket that doesn't fit to a clothes shop. The examiner plays the shop assistant.",
+    "duration_minutes": 6,
+    "examiner_tone": "friendly and natural, like a real person in the situation; age-appropriate for an 11-16 year old MYP student",
+    "skills_assessed": [
+      "Making a purpose or request clear",
+      "Explaining and negotiating when a problem comes up",
+      "Asking and answering questions spontaneously",
+      "Using a register suitable for the situation"
+    ],
+    "redirect_when_off_topic": "Let's get back to our conversation.",
+    "question_style": "role_play",
+    "required_probes": [
+      "give_details",
+      "complication",
+      "agree_outcome"
+    ],
+    "probe_pool": [
+      {
+        "id": "give_details",
+        "type": "question",
+        "prompt": "In character, ask the student for specific details about their situation — what exactly, when, which one, how many — so they have to describe and explain.",
+        "scaffold": "Can you tell me a bit more — when did this happen?"
+      },
+      {
+        "id": "complication",
+        "type": "question",
+        "prompt": "In character, introduce ONE realistic complication from the EXAMINER BRIEF (a rule, a problem, something unavailable). The student must react: explain, persuade or suggest an alternative.",
+        "scaffold": "Hmm, that might be difficult. What else could we do?"
+      },
+      {
+        "id": "student_asks",
+        "type": "question",
+        "prompt": "In character, give the student a natural chance to ask YOU something (e.g. 'Is there anything else you'd like to know?'), so they show they can form questions.",
+        "scaffold": "Do you have any questions for me?"
+      },
+      {
+        "id": "choose_option",
+        "type": "comparison",
+        "prompt": "In character, offer the student two options. They must compare them and choose one, giving a reason.",
+        "scaffold": "You could do this, or that — which would you prefer?"
+      },
+      {
+        "id": "agree_outcome",
+        "type": "synthesis",
+        "prompt": "In character, bring the conversation to a natural end: ask the student to confirm what has been agreed (the plan or solution) in their own words.",
+        "scaffold": "So, just to check — what have we agreed?"
+      },
+      {
+        "id": "precision",
+        "type": "precision",
+        "prompt": "If the student used a vague word ('thing', 'stuff', 'nice'), stay in character and ask what exactly they mean.",
+        "scaffold": "Sorry, which [thing] do you mean exactly?"
+      }
+    ],
+    "opening_script": "This is a role-play. I'll be a shop assistant in a clothes shop, and you are a customer. Last week you bought a jacket here, but it doesn't fit. Your goal is to return it or exchange it. I'll start. Hello, welcome back! How can I help you today?",
+    "examiner_brief": "You are a polite shop assistant. Complications to use (pick one or two): the student has no receipt; the jacket was on sale and sale items can only be exchanged, not refunded; their size is out of stock until next week. Possible solutions: exchange for another size or colour, store credit, or order the size in."
+  },
+  "questions": [
+    {
+      "id": "rp-return-jacket",
+      "theme": "Shopping",
+      "label": "Returning a jacket that doesn't fit",
+      "prompt": "Role-play: the student returns a jacket that doesn't fit to a clothes shop. The examiner plays the shop assistant.",
+      "opening_script": "This is a role-play. I'll be a shop assistant in a clothes shop, and you are a customer. Last week you bought a jacket here, but it doesn't fit. Your goal is to return it or exchange it. I'll start. Hello, welcome back! How can I help you today?",
+      "examiner_brief": "You are a polite shop assistant. Complications to use (pick one or two): the student has no receipt; the jacket was on sale and sale items can only be exchanged, not refunded; their size is out of stock until next week. Possible solutions: exchange for another size or colour, store credit, or order the size in.",
+      "notes": "Good starter role-play: clear goal, easy vocabulary (size, colour, receipt, refund)."
+    },
+    {
+      "id": "rp-lost-bag",
+      "theme": "Travel",
+      "label": "Lost bag at the train station",
+      "prompt": "Role-play: the student reports a lost backpack at a train station's lost property office. The examiner plays the officer.",
+      "opening_script": "This is a role-play. I'll work at the lost property office at a train station, and you are a traveller. You left your backpack on a train this morning. Your goal is to report it and get it back. I'll start. Good morning. How can I help you?",
+      "examiner_brief": "You are a helpful but careful lost-property officer. Ask: which train and time, what the bag looks like, what is inside, contact details. Complications: several similar bags were handed in, so they must describe something unique; or the office closes in ten minutes and the bag may be at another station.",
+      "notes": "Practises description (colour, size, contents) and past tense."
+    },
+    {
+      "id": "rp-doctor-appointment",
+      "theme": "Health",
+      "label": "Booking a doctor's appointment",
+      "prompt": "Role-play: the student phones a clinic to book an appointment because they feel unwell. The examiner plays the receptionist.",
+      "opening_script": "This is a role-play. I'll be a receptionist at a health clinic, and you are phoning because you have felt unwell for a few days. Your goal is to book an appointment. I'll start. Hello, City Health Clinic, how can I help?",
+      "examiner_brief": "You are a busy but kind receptionist. Ask about symptoms and how long they have had them. Complication: the only free appointments are during school hours tomorrow, or with a different doctor next week. The student must negotiate a time and explain why it matters.",
+      "notes": "Body and health vocabulary; negotiating times."
+    },
+    {
+      "id": "rp-host-family",
+      "theme": "Home and culture",
+      "label": "First evening with a host family",
+      "prompt": "Role-play: the student arrives for a school exchange and talks with their host parent on the first evening. The examiner plays the host parent.",
+      "opening_script": "This is a role-play. You have just arrived in another country for a school exchange, and I am your host parent. It's your first evening at our home. Your goal is to introduce yourself and find out how things work in the house. I'll start. Welcome! I hope your journey was okay. Come in and sit down.",
+      "examiner_brief": "You are a warm host parent. Ask about their journey, food they like or can't eat, and plans for the week. House rules to mention if asked or when natural: dinner at 7, quiet after 10, shoes off inside. Complication: the family has planned a trip on Saturday that clashes with something the student wants to do — they must discuss it politely.",
+      "notes": "Intercultural awareness, polite register, asking questions."
+    },
+    {
+      "id": "rp-hotel-problem",
+      "theme": "Travel",
+      "label": "Problem with a hotel room",
+      "prompt": "Role-play: the student complains about a problem with their hotel room. The examiner plays the hotel receptionist.",
+      "opening_script": "This is a role-play. I'll be the receptionist at a hotel, and you are a guest. There is a problem with your room. Your goal is to explain the problem and get it fixed. I'll start. Good evening! Is everything all right with your room?",
+      "examiner_brief": "You are an apologetic receptionist. Let the student choose the problem (noise, broken heater, dirty room, no Wi-Fi). Complication: the hotel is full tonight, so a room change is not possible until tomorrow. Offer alternatives (a repair person, a discount, free breakfast) and let them negotiate.",
+      "notes": "Complaining politely, describing problems, negotiating."
+    },
+    {
+      "id": "rp-plan-weekend",
+      "theme": "Free time",
+      "label": "Planning a weekend with a friend",
+      "prompt": "Role-play: the student and a friend plan what to do on Saturday. The examiner plays the friend, who has different ideas.",
+      "opening_script": "This is a role-play. I'm your friend, and we want to do something together on Saturday. Your goal is to agree on a plan: what we'll do, where, when, and how much it costs. I'll start. Hey! So, what should we do on Saturday?",
+      "examiner_brief": "You are a friendly classmate with different ideas: you prefer something outdoors and cheap; you only have about ten euros (or a similar small amount). React honestly to their suggestions, give reasons, and propose alternatives. Complication: rain is forecast in the afternoon. Agree on a plan by the end.",
+      "notes": "Suggesting, agreeing and disagreeing, future plans."
+    }
+  ],
+  "grading_rubric": "You are an IB MYP Language Acquisition evaluator producing a HOLISTIC report on a 4-6 minute ROLE-PLAY speaking assessment (MYP Criterion C: Speaking). Do not grade turn-by-turn — read the whole exam, then write one integrated judgment per dimension.\n\nTwo voices: AI EXAMINER and STUDENT. The examiner PLAYED A CHARACTER in a real-life situation; the student played themselves with a goal to achieve. Grade ONLY the student.\n\nRole-play scenario:\n  \"{exam_question}\"\n\nTopic context:\n  \"{topic}\"\n\nHOW TO READ THE DIMENSIONS FOR A ROLE-PLAY:\n  clarity       — does the student make their purpose / request clear in role?\n  reasoning     — do they explain, justify and negotiate when the character raises a problem?\n  examples      — do they give specific, relevant details (descriptions, times, quantities, reasons)?\n  engagement    — do they interact spontaneously: ask questions, react, keep the conversation going, use a suitable (polite) register?\n  fluency, pronunciation, confidence — as usual for spoken interaction.\n\nExam metadata (JSON):\n{metadata}\n\nDiarized transcript — authoritative source for evidence:\n{transcript}\n\nNode trace (which probes were reached):\n{node_trace}\n\nDIMENSIONS — each scored 1-4 (1 Emerging · 2 Developing · 3 Proficient · 4 Mastery)\n{dimension_guide}\n\nFor each dimension produce:\n  - score:    integer 1-4\n  - analysis: 2-4 sentences integrated across the whole exam\n  - evidence: 1-3 short student quotes from the transcript. Never quote the examiner. Never write \"Entire recording\".\n\nThen produce:\n  - headline: one sentence (≤ 20 words) overall impression\n  - summary:  4-6 sentence holistic narrative\n  - strengths:    2-3 specific items\n  - growth_areas: 2-3 concrete next steps\n  - overall_score: 0-100 (weigh clarity, engagement and fluency most heavily — the task is getting things done through spoken interaction). If metadata.cancelled is true, set to 0 and set every dimension to 1.\n\nReturn ONLY valid JSON, no markdown:\n{{\n  \"headline\": str,\n  \"summary\": str,\n  \"dimensions\": {{\n    \"clarity\":       {{\"score\": int, \"analysis\": str, \"evidence\": [str, ...]}},\n    \"reasoning\":     {{...}},\n    \"examples\":      {{...}},\n    \"engagement\":    {{...}},\n    \"fluency\":       {{...}},\n    \"pronunciation\": {{...}},\n    \"confidence\":    {{...}}\n  }},\n  \"strengths\": [str, ...],\n  \"growth_areas\": [str, ...],\n  \"overall_score\": float\n}}\n"
+}

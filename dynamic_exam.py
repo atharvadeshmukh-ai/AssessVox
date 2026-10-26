@@ -31,6 +31,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -112,8 +113,15 @@ from pipecat.turns.user_mute import (
 )
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.metrics.metrics import (
+    LLMUsageMetricsData,
+    STTUsageMetricsData,
+    TTSUsageMetricsData,
+)
+from pricing import SessionUsage
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -234,8 +242,16 @@ class LLMCallDumperMixin:
         self._cur_text_chunks: list[str] = []
         self._cur_tool_calls: list[dict] = []
         self._cur_usage: dict | None = None
+        # Finished record waiting for its token usage: pipecat pushes the usage
+        # MetricsFrame only AFTER LLMFullResponseEndFrame, so writing at End
+        # always recorded usage=None ("tokens —" on the dashboard).
+        self._pending_record: dict | None = None
 
     async def _process_context(self, context):
+        if self._pending_record is not None:
+            # Next call started before usage arrived — write without it.
+            rec, self._pending_record = self._pending_record, None
+            asyncio.create_task(self._write_record(rec))
         if self._dump_path is not None:
             try:
                 adapter = self.get_llm_adapter()
@@ -316,7 +332,40 @@ class LLMCallDumperMixin:
                 pass
         return await super().run_function_calls(function_calls)
 
+    @staticmethod
+    def _usage_from_metrics(frame) -> dict | None:
+        """LLM token usage from a MetricsFrame, or None if it carries none."""
+        for entry in (getattr(frame, "data", None) or []):
+            if entry.__class__.__name__ == "LLMUsageMetricsData":
+                val = getattr(entry, "value", None) or entry
+                return {
+                    "prompt_tokens": getattr(val, "prompt_tokens", None),
+                    "completion_tokens": getattr(val, "completion_tokens", None),
+                    "total_tokens": getattr(val, "total_tokens", None),
+                    "cache_read_input_tokens": getattr(val, "cache_read_input_tokens", None),
+                    "cache_creation_input_tokens": getattr(val, "cache_creation_input_tokens", None),
+                    "reasoning_tokens": getattr(val, "reasoning_tokens", None),
+                }
+        return None
+
+    async def _flush_pending_later(self, rec: dict, delay: float = 2.0):
+        """Write a held record even if its usage never arrives."""
+        await asyncio.sleep(delay)
+        if self._pending_record is rec:
+            self._pending_record = None
+            await self._write_record(rec)
+
     async def push_frame(self, frame, direction=None):
+        # Usage for the call that just finished — attach it and write.
+        if self._pending_record is not None and isinstance(frame, MetricsFrame):
+            try:
+                usage = self._usage_from_metrics(frame)
+                if usage is not None:
+                    rec, self._pending_record = self._pending_record, None
+                    rec["usage"] = usage
+                    asyncio.create_task(self._write_record(rec))
+            except Exception:
+                pass
         # Accumulate streamed text + tool calls between Start and End frames.
         if self._cur_record is not None:
             if isinstance(frame, LLMTextFrame) and frame.text:
@@ -338,22 +387,11 @@ class LLMCallDumperMixin:
                 except Exception:
                     pass
             elif isinstance(frame, MetricsFrame):
-                # MetricsFrame.data is a list of MetricsData; find LLMTokenUsage.
+                # Some providers report usage before End — keep it if so.
                 try:
-                    for entry in (getattr(frame, "data", None) or []):
-                        # LLMTokenUsage has: prompt_tokens, completion_tokens,
-                        # total_tokens, cache_read_input_tokens, etc. Just
-                        # serialize whatever it exposes.
-                        if entry.__class__.__name__ == "LLMUsageMetricsData":
-                            val = getattr(entry, "value", None) or entry
-                            self._cur_usage = {
-                                "prompt_tokens": getattr(val, "prompt_tokens", None),
-                                "completion_tokens": getattr(val, "completion_tokens", None),
-                                "total_tokens": getattr(val, "total_tokens", None),
-                                "cache_read_input_tokens": getattr(val, "cache_read_input_tokens", None),
-                                "cache_creation_input_tokens": getattr(val, "cache_creation_input_tokens", None),
-                                "reasoning_tokens": getattr(val, "reasoning_tokens", None),
-                            }
+                    usage = self._usage_from_metrics(frame)
+                    if usage is not None:
+                        self._cur_usage = usage
                 except Exception:
                     pass
             elif isinstance(frame, LLMFullResponseEndFrame):
@@ -367,7 +405,12 @@ class LLMCallDumperMixin:
                 self._cur_tool_calls = []
                 self._cur_usage = None
                 # Best-effort async write — never block the audio pipeline.
-                asyncio.create_task(self._write_record(rec))
+                if rec["usage"] is not None:
+                    asyncio.create_task(self._write_record(rec))
+                else:
+                    # Usage normally follows End; hold the record until it lands.
+                    self._pending_record = rec
+                    asyncio.create_task(self._flush_pending_later(rec))
         # Defer to the existing push_frame chain (incl. AssessVoxGoogleLLMService).
         if direction is not None:
             await super().push_frame(frame, direction)
@@ -387,6 +430,62 @@ class LLMCallDumperMixin:
                     f.write(json.dumps(record, default=str) + "\n")
         except Exception as e:
             logger.warning(f"LLMCallDumper: write failed: {e}")
+
+
+class UsageCollectorObserver(BaseObserver):
+    """Tallies LLM tokens / TTS characters / STT seconds for ONE session.
+
+    Observers are per-PipelineTask, so concurrent exams never mix — unlike the
+    session log files, which receive every exam's lines. The tally is saved to
+    usage/usage_<session>.json at session end and priced by the dashboard.
+    """
+
+    def __init__(self, usage: SessionUsage, **kwargs):
+        super().__init__(observe_every_push=False, **kwargs)
+        self._usage = usage
+
+    async def on_push_frame(self, data: FramePushed):
+        if not isinstance(data.frame, MetricsFrame):
+            return
+        for m in data.frame.data:
+            try:
+                if isinstance(m, LLMUsageMetricsData):
+                    v = m.value
+                    self._usage.add_llm(
+                        "conversation", m.model,
+                        prompt=v.prompt_tokens or 0,
+                        completion=v.completion_tokens or 0,
+                        cache_read=v.cache_read_input_tokens or 0,
+                        cache_write=v.cache_creation_input_tokens or 0,
+                        reasoning=v.reasoning_tokens or 0,
+                    )
+                elif isinstance(m, TTSUsageMetricsData):
+                    self._usage.add_tts(m.model, m.value)
+                elif isinstance(m, STTUsageMetricsData):
+                    self._usage.add_stt(m.model, m.value.audio_seconds)
+            except Exception as e:
+                logger.warning(f"UsageCollector: failed to record {type(m).__name__}: {e}")
+
+
+def _gemini_usage(response, model: str) -> dict | None:
+    """Pull token usage off a google-genai response and log it in the same
+    '📊 ... LLM TOKEN USAGE' shape pipecat uses (so log-based estimates see it)."""
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        return None
+    usage = {
+        "model": model,
+        "prompt": um.prompt_token_count or 0,
+        "completion": um.candidates_token_count or 0,
+        "reasoning": getattr(um, "thoughts_token_count", None) or 0,
+        "cache_read": getattr(um, "cached_content_token_count", None) or 0,
+    }
+    logger.info(
+        f"📊 [Grader] LLM TOKEN USAGE ({model}): prompt: {usage['prompt']}, "
+        f"completion: {usage['completion']}, cache_read: {usage['cache_read']}, "
+        f"reasoning: {usage['reasoning']}"
+    )
+    return usage
 
 
 # Concrete dumper-enabled subclasses, one per provider. Mixin must precede
@@ -996,7 +1095,7 @@ class MarkerStripFilter(FrameProcessor):
 
 from pipecat_flows import FlowManager, FlowsFunctionSchema, FlowArgs, NodeConfig
 
-from flow_planner import generate_flow
+from flow_planner import generate_flow, planned_question_count
 from flow_primitives import ALLOWED_PROBE_TYPES, render_probe_instructions
 from flow_spec_schema import FlowSpec, ProbeNode
 from flow_validator import FlowValidationError, validate_flow_spec
@@ -1012,6 +1111,13 @@ FLOWS_DIR       = Path(__file__).parent / "flows"
 LOGS_DIR        = Path(__file__).parent / "logs"
 LLM_CALLS_DIR   = Path(__file__).parent / "llm_calls"
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
+
+# Which exam the current asyncio task belongs to — set in run_bot and read by
+# each per-session log file's filter. A task that misses it (e.g. created
+# before run_bot) logs as None and its lines go to every open session file.
+_LOG_SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "assessvox_log_session", default=None
+)
 
 # ─── Module-level flow state (populated at startup) ────────────────────────────
 # NOTE: these are module globals, so they are shared by all voice bots in the
@@ -1062,22 +1168,27 @@ def get_current_transcript(session_id: str | None = None) -> list[dict]:
 # Optional teacher-provided student name. When set, run_bot skips the
 # STT-driven name-capture greeting entirely.
 _PROVIDED_STUDENT_NAME: str | None = None
+# IB programme of the chosen template ("MYP" | "DP" | ...). None for free-text
+# questions, which keep the original MYP framing.
+_PROGRAMME: str | None = None
 
 
 def set_active_flow(
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
+    programme: str | None = None,
 ) -> None:
     """Configure module-level state for a session. Called by the server before
     spawning a bot, or by bot() in CLI mode after generating the flow."""
     global _FLOW_SPEC, _PROBE_FACTORIES, _REQUIRED_PROBES, _CUSTOM_GRADING_PROMPT
-    global _PROVIDED_STUDENT_NAME
+    global _PROVIDED_STUDENT_NAME, _PROGRAMME
     _FLOW_SPEC = flow_spec
     _PROBE_FACTORIES = build_probe_factories(flow_spec)
     _REQUIRED_PROBES = set(flow_spec.required_probes)
     _CUSTOM_GRADING_PROMPT = custom_grading_prompt
     _PROVIDED_STUDENT_NAME = (student_name or "").strip() or None
+    _PROGRAMME = (programme or "").strip().upper() or None
 
 
 # ─── Per-session accessors (scalability / concurrency) ─────────────────────────
@@ -1124,6 +1235,143 @@ def _psn(fm=None):
     return _PROVIDED_STUDENT_NAME
 
 
+def _opening_script(fm=None) -> str:
+    """Scripted opening for role-play / listen-and-respond exams ('' otherwise)."""
+    spec = _fspec(fm)
+    if spec is None or spec.question_style == "discussion":
+        return ""
+    return (spec.opening_script or "").strip()
+
+
+async def _speak_opening_script(flow_manager) -> None:
+    """Read the scripted opening word for word (TTS, no LLM paraphrase). Called
+    by every handler that moves into the opening node."""
+    script = _opening_script(flow_manager)
+    if not script:
+        return
+    try:
+        await flow_manager.task.queue_frame(TTSSpeakFrame(script))
+        logger.info(f"Spoke opening script ({_fspec(flow_manager).question_style})")
+    except Exception as e:
+        logger.warning(f"opening script TTSSpeakFrame failed: {e}")
+
+
+def _speak_question_line(fm=None) -> str:
+    """The 'THE EXAM QUESTION' line of the greeting / name-confirmation speak
+    instructions. With a scripted opening, the LLM only acknowledges — the
+    script itself is spoken by the handler."""
+    if _opening_script(fm):
+        return (
+            "THE EXAM QUESTION: scripted — it is played automatically right after "
+            "your speak field. For 'ready' / 'confirmed' your speak must be ONLY a "
+            "warm acknowledgement of 3-6 words (e.g. 'Wonderful, let's begin.'). "
+            "Do NOT say the question, scenario or message yourself.\n"
+        )
+    spec = _fspec(fm)
+    return f"THE EXAM QUESTION (shorten to its core if long): '{spec.exam_question if spec else ''}'\n"
+
+
+def _image_note(fm=None) -> str:
+    """Private description of the picture on the student's screen."""
+    spec = _fspec(fm)
+    desc = (spec.image_description or "").strip() if spec else ""
+    if not desc:
+        return ""
+    return (
+        "PICTURE ON THE STUDENT'S SCREEN (private — for you only): " + desc + "\n"
+        "The student can see this picture; you cannot. Use this description only to "
+        "check what they say and to ask about details they have missed. NEVER read it "
+        "out, describe the picture for them, or hint at details they have not "
+        "mentioned. Their description must come from them.\n\n"
+    )
+
+
+def _format_banner(fm=None) -> str:
+    """Exam-format rules for role-play / listen-and-respond, shown at every step.
+    They override the opinion-style wording of the shared probe primitives."""
+    spec = _fspec(fm)
+    if spec is None or spec.question_style == "discussion":
+        return ""
+    brief = (spec.examiner_brief or "").strip()
+    if spec.question_style == "role_play":
+        return (
+            "EXAM FORMAT — ROLE-PLAY (overrides any probe wording below): you are "
+            "playing a character, not interviewing. Stay in character for the whole "
+            "exam and speak as the character would, in 1-2 short natural sentences. "
+            "Carry out each probe TASK in character. Do NOT ask for the student's "
+            "personal opinion, a counter-argument or 'what is YOUR view' unless the "
+            "TASK says so. Never correct their language. Only step out of character "
+            "for the closing.\n"
+            + (f"EXAMINER BRIEF: {brief}\n" if brief else "")
+            + "\n"
+        )
+    script = (spec.opening_script or "").strip()
+    return (
+        "EXAM FORMAT — LISTEN AND RESPOND: a short message was read aloud to the "
+        "student at the start. Base comprehension follow-ups on that message and "
+        "never give the answers away. If the student asks to hear it again, read it "
+        "ONCE more word for word (only once in the whole exam).\n"
+        + (f"MESSAGE AS READ ALOUD: {script}\n" if script else "")
+        + (f"EXAMINER BRIEF: {brief}\n" if brief else "")
+        + "\n"
+    )
+
+
+def _opening_steps(fm, name: str, exam_question: str) -> str:
+    """Opening-node instructions for the exam's format."""
+    style = _fspec(fm).question_style if _fspec(fm) else "discussion"
+    if style == "role_play":
+        return (
+            f"The role-play scenario has ALREADY been given to {name} (see your "
+            "previous message). Do NOT repeat it.\n"
+            f"SCENARIO (for your reference): '{exam_question}'\n\n"
+            "STEP 1 — STAY IN CHARACTER.\n"
+            f"Reply to {name} as your character would, in 1-2 short natural "
+            f"sentences. Let {name} lead their side. If they seem unsure what to "
+            "do, remind them of their goal in ONE sentence and invite them to start.\n\n"
+            "STEP 2 — ACCEPT OR PROBE.\n"
+            f"Once {name} has made their main request or point in role with at "
+            "least one detail (what, why, when or how), call advance_from_probe "
+            "with depth='surface' or 'developed'. Do NOT demand perfect language.\n\n"
+        )
+    if style == "listen_respond":
+        return (
+            f"The message and a first question about it have ALREADY been given to "
+            f"{name} (see your previous message). Do NOT read the message again "
+            "unless they ask.\n"
+            f"TASK (for your reference): '{exam_question}'\n\n"
+            "STEP 1 — CHECK UNDERSTANDING.\n"
+            f"Listen to {name}'s answer about the message. If they clearly "
+            "misunderstood or ask to hear it again, read the message ONCE more, "
+            "word for word, then re-ask the question.\n\n"
+            "STEP 2 — ACCEPT OR PROBE.\n"
+            f"If {name} gets the main point (even partly, in simple words), call "
+            "advance_from_probe with depth='surface' or 'developed'. After one "
+            "repeat, accept whatever they say. Never give the answer away.\n\n"
+        )
+    return (
+        f"Ask {name} the following exam question, word for word:\n"
+        f"'{exam_question}'\n\n"
+        "STEP 1 — CLARIFY STANCE.\n"
+        "If the student gives only facts or no clear position, redirect: "
+        "'That is good background — but what is YOUR view? "
+        "Do you think it is mainly positive, negative, or complicated?' "
+        "Do not move on until they have a position.\n\n"
+        "STEP 2 — ACCEPT OR PROBE.\n"
+        "If they have a position AND have named at least ONE reason (even "
+        "as a short phrase — 'because it's faster', 'because of comfort', "
+        "'fairness'), ACCEPT IT and call advance_from_probe with depth='surface' "
+        "or 'developed' as appropriate. Do NOT demand more depth from a real "
+        "answer just because it is brief.\n\n"
+    )
+
+
+def _examiner_title(fm=None) -> str:
+    """'IB DP' / 'IB PYP' / 'IB MYP' — how the examiner introduces itself."""
+    prog = fm.state.get("programme") if fm is not None and "programme" in fm.state else _PROGRAMME
+    return {"DP": "IB DP", "PYP": "IB PYP"}.get(prog or "", "IB MYP")
+
+
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
     "You are a warm, encouraging oral examiner for an IB MYP language class "
@@ -1142,6 +1390,9 @@ SYSTEM_PROMPT = (
     "5. NEVER repeat the same follow-up phrase twice. NEVER push deeper on the "
     "   same micro-concept the student is struggling with. If you must ask again, "
     "   move SIDEWAYS to a different aspect of the topic — never just rephrase. "
+    "   NEVER ask a question that seeks the same information as one you already "
+    "   asked, even in different words, and NEVER ask about something the student "
+    "   already explained (even in passing) — build on it instead. "
     "6. INTENT DETECTION: distinguish deliberate evasion from genuine confusion. "
     "   Evasion = unrelated jokes/tangents. Confusion = asking to clarify the question. "
     "   Treat confusion generously — help, do not strike. "
@@ -1152,6 +1403,8 @@ SYSTEM_PROMPT = (
     "   '(silent)', '[wait]', 'No response', or any other stand-in. The correct "
     "   response is literally nothing — your assistant turn must be empty. "
     "8. NEVER output raw JSON, status codes, function names, curly braces, or technical content. "
+    "   Never thank the student for the session or say goodbye yourself while "
+    "   calling a function — the closing step does that, once. "
     "9. Call any strike/transition function at most ONCE per student message. "
     "10. Voice conversation only — no markdown, no bullet points, no emojis. "
     "11. Keep your turns short — facilitate, not teach. "
@@ -1193,6 +1446,20 @@ SYSTEM_PROMPT = (
     "    continue. (Only skipping one question = advance_from_probe, not end_exam.)"
 )
 ROLE_MESSAGES = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+_MYP_AUDIENCE = "an IB MYP language class (students aged 11 to 16)"
+_PROGRAMME_AUDIENCE = {
+    "DP": "an IB Diploma Programme (DP) class (students aged 16 to 19)",
+    "PYP": "an IB PYP class (students aged 3 to 12)",
+}
+
+
+def _role_messages_for(programme: str | None) -> list[dict]:
+    """ROLE_MESSAGES with the audience line matching the template's programme."""
+    audience = _PROGRAMME_AUDIENCE.get(programme or "")
+    if not audience:
+        return list(ROLE_MESSAGES)
+    return [{"role": "system", "content": SYSTEM_PROMPT.replace(_MYP_AUDIENCE, audience)}]
 
 ADVANCE_PROBE_SCHEMA = {
     "depth": {
@@ -1343,7 +1610,7 @@ def _state_block(flow_manager: FlowManager) -> str:
             gold = gold[:237] + "…"
         lines.append(f"• Last gold moment from student: \"{gold}\"")
     lines.append("[/SESSION STATE]")
-    return "\n".join(lines) + "\n\n"
+    return "\n".join(lines) + "\n\n" + _format_banner(flow_manager) + _image_note(flow_manager)
 
 
 async def handle_global_off_topic(
@@ -1458,7 +1725,7 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
                 "STEP 1 — INITIAL GREETING (no function call yet).\n"
                 "If there is NO user message in the conversation history (i.e. the "
                 "student has not spoken yet), simply greet the student warmly. "
-                "Introduce yourself as their IB MYP oral examiner. Explain you will "
+                f"Introduce yourself as their {_examiner_title(flow_manager)} oral examiner. Explain you will "
                 "have a short discussion and that there are no right or wrong "
                 "answers — you want to hear their thoughts. Ask for their name. "
                 "Then STOP and WAIT silently. Do NOT call assess_name_response. "
@@ -1520,21 +1787,27 @@ def create_greeting_node(flow_manager: FlowManager = None) -> NodeConfig:
 
 # ─── Name confirmation + spell-out fallback ────────────────────────────────────
 
-def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
+def create_known_name_greeting_node(
+    flow_manager: FlowManager, respond_immediately: bool = True
+) -> NodeConfig:
     """Greeting used when the teacher provided the student's name via the UI.
     Greets by name, introduces the examiner, then asks 'Are you ready to begin?'
     and waits for the student's reply before transitioning to the first
     question. Skips STT-based name capture entirely.
+
+    respond_immediately=False re-enters the node silently (the handler already
+    spoke via TTS) and waits for the student's next utterance.
     """
     name = flow_manager.state.get("name", "student")
     return NodeConfig(
         name="greeting_known_name",
+        respond_immediately=respond_immediately,
         role_messages=[],  # seeded once in LLMContext at session start
         task_messages=[{
             "role": "system",
             "content": (
                 f"The student's name is {name}. Greet {name} warmly by name in "
-                "one or two short sentences, introduce yourself as their IB MYP "
+                f"one or two short sentences, introduce yourself as their {_examiner_title(flow_manager)} "
                 "oral examiner, and reassure them there are no right or wrong "
                 "answers — you want to hear their thoughts. End your greeting "
                 "by asking clearly: 'Are you ready to begin?'\n\n"
@@ -1557,7 +1830,7 @@ def create_known_name_greeting_node(flow_manager: FlowManager) -> NodeConfig:
                 "naturally as follow-ups. Never deliver a big paragraph or "
                 "multiple questions at once. "
                 "Example: 'Wonderful! Here's our question: [the one core question]'\n"
-                f"THE EXAM QUESTION (shorten to its core if long): '{_fspec(flow_manager).exam_question if _fspec(flow_manager) else ''}'\n"
+                f"{_speak_question_line(flow_manager)}"
                 "For 'not_ready': a gentle reassurance."
             ),
         }],
@@ -1628,7 +1901,7 @@ def create_confirm_name_node(flow_manager: FlowManager) -> NodeConfig:
                 "question now; other parts come up as follow-ups. Never deliver a "
                 "big paragraph or multiple questions at once. Example: "
                 "'Wonderful, [name]! Here's our question: [the one core question]' "
-                f"THE EXAM QUESTION (shorten to its core if long): '{exam_question}'\n"
+                f"{_speak_question_line(flow_manager)}"
                 "For 'corrected' with a new name: confirm the new name warmly. "
                 "For 'corrected' without a name: ask them to spell it."
             ),
@@ -1708,6 +1981,9 @@ def create_spell_name_node(flow_manager: FlowManager) -> NodeConfig:
                     "speak": {
                         "type": "string",
                         "description": (
+                            "Confirm the recorded name warmly in 3-5 words ONLY — "
+                            "the exam opening is played automatically right after."
+                            if _opening_script(flow_manager) else
                             "ONE flowing statement: confirm the recorded name warmly "
                             "(3-5 words) then immediately pose the exam question "
                             f"verbatim: '{_fspec(flow_manager).exam_question if _fspec(flow_manager) else ''}'"
@@ -1742,20 +2018,8 @@ def create_opening_node(flow_manager: FlowManager, respond_immediately: bool = T
             "content": (
                 f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
-                f"{time_notice}{support_notice}{no_repeat}"
-                f"Ask {name} the following exam question, word for word:\n"
-                f"'{exam_question}'\n\n"
-                "STEP 1 — CLARIFY STANCE.\n"
-                "If the student gives only facts or no clear position, redirect: "
-                "'That is good background — but what is YOUR view? "
-                "Do you think it is mainly positive, negative, or complicated?' "
-                "Do not move on until they have a position.\n\n"
-                "STEP 2 — ACCEPT OR PROBE.\n"
-                "If they have a position AND have named at least ONE reason (even "
-                "as a short phrase — 'because it's faster', 'because of comfort', "
-                "'fairness'), ACCEPT IT and call advance_from_probe with depth='surface' "
-                "or 'developed' as appropriate. Do NOT demand more depth from a real "
-                "answer just because it is brief.\n\n"
+                f"{time_notice}{_pacing_prefix(flow_manager)}{support_notice}{no_repeat}"
+                f"{_opening_steps(flow_manager, name, exam_question)}"
                 "STEP 3 — CALL FUNCTION.\n"
                 f"Available probe IDs for recommended_next: {available}.\n\n"
                 "DISENGAGE SIGNALS — mandatory, overrides everything else:\n"
@@ -1858,20 +2122,57 @@ def _recent_examiner_openings(n: int = 3, max_words: int = 9, fm=None) -> list[s
     return list(reversed(out))
 
 
+def _asked_questions(fm=None, n: int = 12, max_words: int = 25) -> list[str]:
+    """Every question sentence the examiner has asked so far (most recent `n`),
+    deduplicated. Read from the live transcript, which is never summarised, so
+    the list survives auto-context compression of older turns."""
+    lt = (fm.state.get("live_transcript") if fm is not None else None) or _CURRENT_TRANSCRIPT
+    if lt is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in lt.turns:
+        if t["speaker"] != "EXAMINER":
+            continue
+        for q in re.findall(r"[^.?!]*\?", t["text"]):
+            words = q.strip().split()
+            if len(words) < 4 or "ready to begin" in q.lower():
+                continue
+            q = " ".join(words[:max_words])
+            if q.lower() in seen:
+                continue
+            seen.add(q.lower())
+            out.append(q)
+    return out[-n:]
+
+
 def _no_repeat_prefix(flow_manager: FlowManager) -> str:
-    """Inject a 'do not reuse these openers' block into the next probe's
-    task_messages, populated with the openings of the assistant's last few
-    turns. Hard counter to the LLM's tendency to glom onto one phrasing."""
+    """Inject an anti-repetition block into the next probe's task_messages:
+    the questions already asked (so the LLM can't re-ask them, even reworded)
+    plus the openings of its last few turns (so it varies its phrasing)."""
+    asked = _asked_questions(fm=flow_manager)
     openings = _recent_examiner_openings(fm=flow_manager)
-    if not openings:
-        return ""
-    bullets = "\n".join(f"  • '{o}…'" for o in openings)
-    return (
-        "DO NOT REUSE YOUR RECENT OPENERS — you have already used these in "
-        "your last few turns. Open this turn with a COMPLETELY different "
-        "acknowledgement / transition / lead-in. Variety is mandatory.\n"
-        f"{bullets}\n\n"
-    )
+    out = ""
+    if asked:
+        bullets = "\n".join(f"  • {q}" for q in asked)
+        out += (
+            "QUESTIONS YOU HAVE ALREADY ASKED — do NOT ask any of these again, "
+            "and do NOT ask anything that seeks the SAME information in different "
+            "words (a reworded question is still a repeat). Also do NOT ask about "
+            "anything the student has already explained in the conversation, even "
+            "in passing — build on it instead. Your next question must target a "
+            "genuinely NEW aspect.\n"
+            f"{bullets}\n\n"
+        )
+    if openings:
+        bullets = "\n".join(f"  • '{o}…'" for o in openings)
+        out += (
+            "DO NOT REUSE YOUR RECENT OPENERS — you have already used these in "
+            "your last few turns. Open this turn with a COMPLETELY different "
+            "acknowledgement / transition / lead-in. Variety is mandatory.\n"
+            f"{bullets}\n\n"
+        )
+    return out
 
 
 def _support_notice_prefix(flow_manager: FlowManager) -> str:
@@ -1917,7 +2218,8 @@ def create_dynamic_probe_node(
             "content": (
                 f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
-                f"{time_notice}{revisit_notice}{support_notice}{no_repeat}{instructions}"
+                f"{time_notice}{_pacing_prefix(flow_manager)}{revisit_notice}"
+                f"{support_notice}{no_repeat}{instructions}"
             ),
         }],
         functions=[
@@ -1954,7 +2256,7 @@ def create_followup_probe_node(
             "content": (
                 f"{_state_block(flow_manager)}"
                 f"{_off_topic_instruction(count, name, flow_manager)}\n\n"
-                f"{time_notice}{support_notice}{no_repeat}"
+                f"{time_notice}{_pacing_prefix(flow_manager)}{support_notice}{no_repeat}"
                 f"{name} just said something worth following up on:\n"
                 f"'{gold_moment}'\n\n"
                 f"Ask {name} ONE question to dig deeper into that specific idea. "
@@ -2000,6 +2302,13 @@ def create_closing_node(flow_manager: FlowManager) -> NodeConfig:
             "Do NOT give feedback on language, performance, or scores. "
             "Do NOT ask any further questions."
         )
+    # The examiner sometimes thanks the student in the same turn it advances
+    # to closing, which made the closing a second "thank you".
+    content += (
+        " IMPORTANT: if your previous message already thanked the student, do "
+        "NOT thank them again — say only, in one short sentence, that the oral "
+        "discussion is now complete."
+    )
 
     return NodeConfig(
         name="closing",
@@ -2043,6 +2352,53 @@ def _compute_time_state(flow_manager: FlowManager) -> dict:
         "hit_warning": frac >= TIME_WARNING_THRESHOLD,
         "hit_hard": frac >= TIME_HARD_THRESHOLD,
     }
+
+
+# ─── Pacing ────────────────────────────────────────────────────────────────────
+# The exam should END on time NATURALLY, not be cut off. Each question gets a
+# share of the remaining time; the examiner is told its share up front, nudged
+# to move on (after the student's current answer) once the share is used, and
+# the exam closes at a question boundary once there's no time for another one.
+CLOSE_RESERVE_SECS = 30   # kept free at the end for the closing words
+MIN_QUESTION_SECS = 50    # don't start a new question with less than this left
+PACING_FAILSAFE_SECS = 120  # overtime after which we close even mid-question
+
+
+def _pacing(flow_manager: FlowManager) -> dict:
+    """Return {time_left, questions_left, slice}: questioning seconds left
+    (before the closing reserve), questions still planned, and the time share
+    for the next question."""
+    ts = _compute_time_state(flow_manager)
+    planned = planned_question_count(ts["budget"] / 60)
+    asked = len(flow_manager.state.get("covered_probes", []))
+    questions_left = max(1, planned - asked)
+    time_left = max(0.0, ts["budget"] - ts["elapsed"] - CLOSE_RESERVE_SECS)
+    return {
+        "time_left": time_left,
+        "questions_left": questions_left,
+        "slice": time_left / questions_left,
+    }
+
+
+def _pacing_prefix(flow_manager: FlowManager) -> str:
+    """Tell the examiner how much time this question gets, so it paces the
+    follow-ups itself instead of being stopped by the clock."""
+    if not flow_manager.state.get("started_at_iso"):
+        return ""
+    p = _pacing(flow_manager)
+    if p["time_left"] < 2 * MIN_QUESTION_SECS:
+        return (
+            "PACING: this is the LAST question of the exam. Ask it, let the "
+            "student answer fully, then call advance_from_probe — the exam will "
+            "close after it. Do NOT mention time or the clock.\n\n"
+        )
+    return (
+        f"PACING: about {p['time_left'] / 60:.1f} minutes of questioning remain — "
+        f"roughly {p['questions_left']} more question(s), ~{p['slice']:.0f} seconds "
+        "each. Keep this question to the main ask plus at most ONE short "
+        "follow-up, then call advance_from_probe. Never rush the student or "
+        "mention the time.\n\n"
+    )
 
 
 # ─── Smart transition handler ──────────────────────────────────────────────────
@@ -2190,13 +2546,15 @@ async def handle_transition(
             f"(voluntary_skips={voluntary_skips})"
         )
 
-    # Hard time cap: skip to closing after the current probe
-    if time_state["hit_hard"]:
-        logger.warning(
-            f"Time budget exhausted ({time_state['elapsed']:.0f}s >= "
-            f"{time_state['budget']:.0f}s) — forcing closing"
+    # Natural end: the student has just finished an answer. If there isn't
+    # room for another question before the closing reserve, close now — at a
+    # question boundary, so nothing is cut off and the exam ends on time.
+    pace = _pacing(flow_manager)
+    if pace["time_left"] < MIN_QUESTION_SECS:
+        logger.info(
+            f"Pacing: {pace['time_left']:.0f}s of questioning left "
+            f"(< {MIN_QUESTION_SECS}s) — closing after this answer"
         )
-        flow_manager.state.update({"ended_early_for_time": True})
         return ({}, create_closing_node(flow_manager))
 
     # Soft time warning: fire ONCE when we cross 75% of budget. We don't
@@ -2225,7 +2583,8 @@ async def handle_transition(
     # ── Routing decisions (unchanged below) ───────────────────────────────
     gold = args.get("gold_moment", "").strip()
     gold_followed = flow_manager.state.get("gold_followed", 0)
-    if gold and gold_followed < 1:
+    # A gold-moment follow-up is an extra question — only if time allows.
+    if gold and gold_followed < 1 and pace["time_left"] >= 2 * MIN_QUESTION_SECS:
         flow_manager.state.update({
             "gold_followed": gold_followed + 1,
             "current_probe": "followup_probe",
@@ -2236,7 +2595,7 @@ async def handle_transition(
         logger.info(f"Following gold moment: {gold!r}")
         return ({}, create_followup_probe_node(flow_manager, gold))
 
-    missing_required = _REQUIRED_PROBES - covered
+    missing_required = set(_rprobes(flow_manager)) - covered
     if missing_required:
         next_id = sorted(missing_required)[0]
         logger.info(f"Required probe not yet covered: {next_id!r}")
@@ -2251,15 +2610,13 @@ async def handle_transition(
 
     remaining = [p.id for p in _fspec(flow_manager).probe_pool if p.id not in covered]
     if not remaining:
-        # All probes covered — but should we really close, or revisit?
-        # Close only if we're past the 75% time-warning threshold OR we've
-        # already revisited the max number of times. Otherwise revisit the
-        # least-explored covered probe with a "supportive" notice.
+        # All probes covered but time remains (the pacing check above already
+        # closed if it didn't). Revisit the least-explored covered probe from
+        # a new angle so the exam fills its duration, up to REVISIT_LIMIT.
         revisit_count = flow_manager.state.get("revisit_count", 0)
-        if time_state["hit_warning"] or revisit_count >= REVISIT_LIMIT:
+        if revisit_count >= REVISIT_LIMIT:
             logger.info(
-                f"All probes covered + (time_warning={time_state['hit_warning']} or "
-                f"revisits={revisit_count}/{REVISIT_LIMIT}) — closing"
+                f"All probes covered + revisits={revisit_count}/{REVISIT_LIMIT} — closing"
             )
             return ({}, create_closing_node(flow_manager))
 
@@ -2362,6 +2719,7 @@ async def handle_name_confirmation(
         })
         # exam question already spoken in the speak field — opening loads
         # its probe-handling prompt silently, waits for student to respond.
+        await _speak_opening_script(flow_manager)
         return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
     # Student rejected the read-back. If they supplied a corrected name in the
@@ -2374,6 +2732,7 @@ async def handle_name_confirmation(
             "current_probe": "opening",
         })
         # Same: exam question was in the speak field, opening is silent.
+        await _speak_opening_script(flow_manager)
         return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
     logger.info("Name rejected, asking student to spell it out")
@@ -2399,7 +2758,7 @@ async def handle_begin_exam(
     if flow_manager.state.get("student_utterance_count", 0) == 0:
         name = (flow_manager.state.get("name") or "there").strip() or "there"
         greeting = (
-            f"Hello {name}! I'm your IB MYP oral examiner for today. This is a "
+            f"Hello {name}! I'm your {_examiner_title(flow_manager)} oral examiner for today. This is a "
             "short, relaxed discussion — there are no right or wrong answers, I "
             "just want to hear your thoughts. Are you ready to begin?"
         )
@@ -2411,7 +2770,14 @@ async def handle_begin_exam(
             )
         except Exception as e:
             logger.warning(f"greeting TTSSpeakFrame failed: {e}")
-        return ({"next_action": "wait_for_student"}, None)
+        # Must return a node, not None: pipecat-flows re-runs the LLM after any
+        # non-transition function result, and the model then "apologises" for
+        # starting early and asks the question itself — leaving the whole exam
+        # stuck in the greeting node. A silent re-entry suppresses that re-run.
+        return (
+            {"next_action": "wait_for_student"},
+            create_known_name_greeting_node(flow_manager, respond_immediately=False),
+        )
 
     if speak_text:
         try:
@@ -2428,9 +2794,13 @@ async def handle_begin_exam(
             f"Student not yet ready (count={flow_manager.state['not_ready_count']}); "
             "staying in greeting."
         )
+        # Reassurance was already spoken above — re-enter silently so the LLM
+        # doesn't generate a second one on top of it.
         return (
             {"next_action": "wait_for_student"},
-            create_known_name_greeting_node(flow_manager),
+            create_known_name_greeting_node(
+                flow_manager, respond_immediately=not speak_text
+            ),
         )
 
     logger.info("Student is ready; advancing to opening question.")
@@ -2443,6 +2813,7 @@ async def handle_begin_exam(
         "idle_advance_pending": False,
     })
     # exam question already spoken in speak field — opening is silent.
+    await _speak_opening_script(flow_manager)
     return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
 
@@ -2468,6 +2839,7 @@ async def handle_spelled_name(
         "current_probe": "opening",
     })
     # exam question already spoken in speak field — opening is silent.
+    await _speak_opening_script(flow_manager)
     return ({}, create_opening_node(flow_manager, respond_immediately=False))
 
 
@@ -2822,6 +3194,7 @@ def _grade_exam_video_sync(
             max_output_tokens=12288,
         ),
     ), what="video grading")
+    grader_usage = _gemini_usage(response, VIDEO_GRADER_MODEL)
     text = (response.text or "{}").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -2829,10 +3202,10 @@ def _grade_exam_video_sync(
     first, last = text.find("{"), text.rfind("}")
     candidate = text[first:last + 1] if (first != -1 and last > first) else text
     try:
-        return json.loads(candidate)
+        return {**json.loads(candidate), "_grader_usage": grader_usage}
     except json.JSONDecodeError as e:
         logger.error(f"Video grader returned non-JSON ({e}). First 500: {text[:500]}")
-        return {"error": "invalid_json", "raw": text}
+        return {"error": "invalid_json", "raw": text, "_grader_usage": grader_usage}
 
 
 def _write_wav(path: Path, pcm: bytes, sample_rate: int, num_channels: int) -> None:
@@ -2952,6 +3325,7 @@ def _grade_exam_sync(
             max_output_tokens=8192,   # 7-dim report can be long; default cap truncates
         ),
     ), what="audio grading")
+    grader_usage = _gemini_usage(response, GRADER_MODEL)
     text = (response.text or "{}").strip()
 
     # Defensive: some models wrap JSON in ```json ... ``` despite the mime hint.
@@ -2969,12 +3343,12 @@ def _grade_exam_sync(
         candidate = text
 
     try:
-        return json.loads(candidate)
+        return {**json.loads(candidate), "_grader_usage": grader_usage}
     except json.JSONDecodeError as e:
         logger.error(
             f"Grader returned non-JSON ({e}). First 1000 chars:\n{text[:1000]}"
         )
-        return {"error": "invalid_json", "raw": text}
+        return {"error": "invalid_json", "raw": text, "_grader_usage": grader_usage}
 
 
 async def grade_exam(
@@ -2988,6 +3362,7 @@ async def grade_exam(
     topic: str,
     video_path: Path | None = None,
     custom_video_prompt: str | None = None,
+    usage: SessionUsage | None = None,
 ) -> None:
     node_trace_str = (
         "\n".join(f"  {n['ts']}  → {n['node']}" for n in node_trace)
@@ -3019,6 +3394,14 @@ async def grade_exam(
             logger.exception(f"Grading failed: {e}")
             report = {"error": str(e)}
         report["audio_file"] = str(wav_path)
+
+    grader_usage = report.pop("_grader_usage", None)
+    if usage is not None and grader_usage:
+        usage.add_llm(
+            "grading", grader_usage["model"],
+            prompt=grader_usage["prompt"], completion=grader_usage["completion"],
+            cache_read=grader_usage["cache_read"], reasoning=grader_usage["reasoning"],
+        )
 
     report["metadata"] = metadata
     report["transcript"] = transcript_turns
@@ -3367,16 +3750,22 @@ async def run_bot(
     _sess_required_probes = _REQUIRED_PROBES
     _sess_custom_grading = _CUSTOM_GRADING_PROMPT
     _sess_provided_name = _PROVIDED_STUDENT_NAME
+    _sess_programme = _PROGRAMME
 
     # Per-session log file — captures every loguru log line emitted during this
     # session so we can post-mortem any one run without scrolling stdout.
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     session_log_path = LOGS_DIR / f"session_{session_id}.log"
+    # Tag this exam's asyncio task (and every task it spawns) so the file keeps
+    # only this exam's lines when several exams run at once. Untagged lines
+    # (server-level, or tasks created before this point) are still kept.
+    _LOG_SESSION.set(session_id)
     _session_log_sink_id = logger.add(
         str(session_log_path),
         level="DEBUG",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
         enqueue=True,
+        filter=lambda record, sid=session_id: _LOG_SESSION.get() in (sid, None),
     )
 
     logger.info(
@@ -3411,13 +3800,21 @@ async def run_bot(
     LLM_CALLS_DIR.mkdir(parents=True, exist_ok=True)
     _llm_dump_path = LLM_CALLS_DIR / f"calls_{session_id}.jsonl"
 
+    # The examiner rulebook goes in as the service's system_instruction, NOT as
+    # a system message in the context. pipecat-flows registers its functions as
+    # async tools, which makes pipecat compose its own system_instruction; on
+    # Anthropic and Gemini a context system message is then silently DROPPED
+    # (the "Both system_instruction and an initial system message" warning), so
+    # the rulebook never reached the model. Setting it here keeps both.
+    _role_prompt = _role_messages_for(_sess_programme)[0]["content"]
+
     if llm_provider == "groq":
         groq_key = os.getenv("GROQ_API_KEY", "")
         if not groq_key:
             raise RuntimeError("GROQ_API_KEY not set in .env")
         llm = _DumpingGroqLLMService(
             api_key=groq_key,
-            settings=GroqLLMService.Settings(model=llm_model),
+            settings=GroqLLMService.Settings(model=llm_model, system_instruction=_role_prompt),
             _dump_path=_llm_dump_path,
         )
     elif llm_provider == "openai":
@@ -3426,7 +3823,7 @@ async def run_bot(
             raise RuntimeError("OPENAI_API_KEY not set in .env")
         llm = _DumpingOpenAILLMService(
             api_key=openai_key,
-            settings=OpenAILLMService.Settings(model=llm_model),
+            settings=OpenAILLMService.Settings(model=llm_model, system_instruction=_role_prompt),
             _dump_path=_llm_dump_path,
         )
     elif llm_provider == "anthropic":
@@ -3435,7 +3832,7 @@ async def run_bot(
             raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
         llm = _DumpingAnthropicLLMService(
             api_key=anthropic_key,
-            settings=AnthropicLLMService.Settings(model=llm_model),
+            settings=AnthropicLLMService.Settings(model=llm_model, system_instruction=_role_prompt),
             _dump_path=_llm_dump_path,
         )
     elif llm_provider == "cerebras":
@@ -3461,6 +3858,7 @@ async def run_bot(
             api_key=cerebras_key,
             settings=CerebrasLLMService.Settings(
                 model=llm_model,
+                system_instruction=_role_prompt,
                 extra={"reasoning_effort": "low"},
             ),
             _dump_path=_llm_dump_path,
@@ -3475,6 +3873,7 @@ async def run_bot(
         # output for our oral-exam workload (no chain-of-thought needed).
         _gemini_settings = AssessVoxGoogleLLMService.Settings(
             model=llm_model,
+            system_instruction=_role_prompt,
             thinking=AssessVoxGoogleLLMService.ThinkingConfig(
                 # Model-aware: gemini-3.8+ rejects "minimal" (400), floors at
                 # "low"; older flash keeps "minimal". See _gemini_thinking_level.
@@ -3496,7 +3895,8 @@ async def run_bot(
     # Fix: seed the context here at creation so ROLE_MESSAGES is already
     # present, then pass role_messages=[] on all nodes so _set_node has
     # nothing new to append.
-    context = LLMContext(messages=list(ROLE_MESSAGES))
+    # Rulebook lives in llm system_instruction (see _role_prompt above).
+    context = LLMContext(messages=[])
     # ─── Turn-taking config (canonical Pipecat-flows shape) ─────────────────
     # Matches pipecat-flows/examples/insurance_quote.py verbatim. SileroVAD
     # at defaults + boolean `filter_incomplete_user_turns=True` is the
@@ -3784,7 +4184,8 @@ async def run_bot(
     # readers (e.g. anti-repetition).
     live_transcript = LiveTranscript()
     _register_live_session(session_id, context, live_transcript)
-    flow_manager.state["live_transcript"] = live_transcript
+    # NOTE: flow_manager doesn't exist yet here — live_transcript is stashed onto
+    # flow_manager.state in the seeding block AFTER FlowManager is created.
     global _CURRENT_CONTEXT, _CURRENT_SESSION_ID, _CURRENT_TRANSCRIPT
     _CURRENT_CONTEXT = context
     _CURRENT_SESSION_ID = session_id
@@ -3855,6 +4256,8 @@ async def run_bot(
             await super().on_push_frame(data)
 
     latency_observer = _Ink2LatencyObserver(enable_metrics=True)
+    # Per-session token / character / audio-second tally → usage/usage_<id>.json
+    session_usage = SessionUsage()
 
     @latency_observer.event_handler("on_latency_measured")
     async def on_latency_measured(observer, latency_seconds):
@@ -3877,7 +4280,10 @@ async def run_bot(
             enable_usage_metrics=True,
             allow_interruptions=True,
         ),
-        observers=[RTVIObserver(rtvi), metrics_logger, latency_observer],
+        observers=[
+            RTVIObserver(rtvi), metrics_logger, latency_observer,
+            UsageCollectorObserver(session_usage),
+        ],
     )
 
     flow_manager = FlowManager(
@@ -3929,6 +4335,9 @@ async def run_bot(
         "required_probes": _sess_required_probes,
         "custom_grading_prompt": _sess_custom_grading,
         "provided_student_name": _sess_provided_name,
+        "programme": _sess_programme,
+        # Per-session live transcript (for in-exam readers like anti-repetition).
+        "live_transcript": live_transcript,
     })
 
     wav_path    = RECORDINGS_DIR / f"exam_{session_id}.wav"
@@ -3980,12 +4389,77 @@ async def run_bot(
             "revisit_count": state.get("revisit_count", 0),
             "cap_violations": state.get("cap_violations", []),
             "flow_spec_file": str(FLOWS_DIR / f"flow_{session_id}.json"),
+            "image_description": _sess_flow_spec.image_description or None,
         }
         await grade_exam(
             wav_path, metadata, report_path,
             transcript_turns, node_trace, duration_s,
             _sess_flow_spec.exam_question, _sess_flow_spec.topic,
+            usage=session_usage,
         )
+
+    # Pacing monitor. handle_transition only acts when the examiner moves to
+    # the next question, so a long run of follow-ups inside one question could
+    # overrun. This never cuts the conversation off — it adds a note the
+    # examiner reads on its NEXT turn (after the student's current answer):
+    #   question share used     → "acknowledge and move on to the next question"
+    #   closing reserve reached → "acknowledge and advance" (routing then closes)
+    #   PACING_FAILSAFE_SECS over budget → close anyway (LLM ignored the notes)
+    exam_clock: dict = {"task": None}
+
+    async def _pacing_note(text: str) -> None:
+        await task.queue_frame(LLMMessagesAppendFrame(
+            messages=[{"role": "system", "content": text}], run_llm=False,
+        ))
+
+    async def _exam_clock():
+        loop = asyncio.get_running_loop()
+        q_id, q_start, q_slice, q_nudged = None, 0.0, 0.0, False
+        time_up_sent = False
+        try:
+            while not task.has_finished():
+                await asyncio.sleep(3)
+                node = flow_manager.current_node or ""
+                if node in ("closing", "cancelled"):
+                    return
+                # Only pace the exam proper, not the greeting / name capture.
+                if node not in ("opening", "followup_probe") and node not in _pfact(flow_manager):
+                    continue
+                cur = flow_manager.state.get("current_probe")
+                if cur != q_id:
+                    q_id, q_start, q_nudged = cur, loop.time(), False
+                    q_slice = max(_pacing(flow_manager)["slice"], MIN_QUESTION_SECS)
+                ts = _compute_time_state(flow_manager)
+                remaining = ts["budget"] - ts["elapsed"]
+                if remaining <= -PACING_FAILSAFE_SECS:
+                    logger.warning("Pacing failsafe: well over time — closing")
+                    flow_manager.state.update({"ended_early_for_time": True})
+                    await flow_manager.set_node_from_config(create_closing_node(flow_manager))
+                    return
+                if remaining <= CLOSE_RESERVE_SECS:
+                    if not time_up_sent:
+                        time_up_sent = True
+                        logger.info("Pacing: exam time reached — closing after this answer")
+                        await _pacing_note(
+                            "[PACING] The exam time is up. Do NOT ask another "
+                            "question. When the student finishes their current "
+                            "answer, call advance_from_probe straight away — do "
+                            "NOT thank them or say goodbye; the closing step "
+                            "does that."
+                        )
+                elif not q_nudged and loop.time() - q_start > q_slice:
+                    q_nudged = True
+                    logger.info(f"Pacing: question {q_id!r} used its {q_slice:.0f}s share")
+                    await _pacing_note(
+                        "[PACING] This question has had its share of the exam "
+                        "time. Do NOT ask another follow-up on it. When the "
+                        "student finishes their current answer, acknowledge it "
+                        "briefly and call advance_from_probe."
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("exam clock failed")
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -3996,6 +4470,7 @@ async def run_bot(
         flow_manager.state.update({
             "started_at_iso": started_at["t"].isoformat(timespec="seconds"),
         })
+        exam_clock["task"] = asyncio.create_task(_exam_clock())
         await audio_buffer.start_recording()
         if _sess_provided_name:
             flow_manager.state.update({"name": _sess_provided_name})
@@ -4012,6 +4487,8 @@ async def run_bot(
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Student disconnected")
+        if exam_clock["task"]:
+            exam_clock["task"].cancel()
         await task.cancel()
 
     # Safety net: fires when a user turn was opened but no usable transcript
@@ -4118,6 +4595,11 @@ async def run_bot(
             logger.info(f"Transcript snapshot saved → {snapshot_path}")
         except Exception:
             logger.exception("Failed to write transcript snapshot")
+        try:
+            usage_path = session_usage.save(session_id)
+            logger.info(f"Usage saved → {usage_path}")
+        except Exception:
+            logger.exception("Failed to write usage file")
         # Drop this session's live-transcript registry entry (the report file is
         # canonical from here on) so the registry doesn't accumulate.
         _unregister_live_session(session_id)
@@ -4135,6 +4617,7 @@ async def run_session(
     flow_spec: FlowSpec,
     custom_grading_prompt: str | None = None,
     student_name: str | None = None,
+    programme: str | None = None,
     llm_provider: str = DEFAULT_LLM_PROVIDER,
     llm_model: str = DEFAULT_LLM_MODEL,
     stt_provider: str = "cartesia-ink-2",
@@ -4149,6 +4632,7 @@ async def run_session(
         flow_spec,
         custom_grading_prompt=custom_grading_prompt,
         student_name=student_name,
+        programme=programme,
     )
     logger.info(
         f"Flow ready | session={session_id} | {len(flow_spec.probe_pool)} probes | "

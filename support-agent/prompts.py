@@ -35,6 +35,10 @@ def build_exam_instructions(spec: dict[str, Any]) -> str:
     topic = spec.get("topic", "")
     examiner_tone = spec.get("examiner_tone", "warm, professional, intellectually curious")
     duration = spec.get("duration_minutes", 10)
+    # Same pacing model as flow_planner.planned_question_count (~75s per
+    # question plus ~60s greeting/closing); kept inline since the worker runs
+    # from support-agent/.
+    n_questions = max(2, round((duration * 60 - 60) / 75))
     redirect = spec.get("redirect_when_off_topic", "Let's bring it back to the question.")
     student_name = (spec.get("student_name") or "the student").strip()
     skills = spec.get("skills_assessed") or []
@@ -163,9 +167,14 @@ Then STOP and wait silently for the student to respond. {name_capture_note}
 {skills_block}
 
 # Probes — your toolkit of questions
-You have ~{duration} minutes total. Cover the REQUIRED probes ({required_str})
-at minimum. Use optional probes to deepen the conversation when the student is
-strong, or to scaffold when they're struggling.
+You have {duration} minutes total. Plan about {n_questions} questions in all
+(including the opening task), roughly 75 seconds each: ask, let the student
+answer, at most ONE short follow-up, then move on. Cover the REQUIRED probes
+({required_str}) first. Use optional probes to deepen the conversation when the
+student is strong, or to scaffold when they're struggling. Pace yourself so the
+discussion ends naturally at the time limit — you will receive TIME NOTICE
+updates telling you how much time is left; follow them. Never mention the clock
+to the student and never cut a student off mid-answer.
 
 {probe_block}
 
@@ -191,7 +200,8 @@ END_EXAM
   • All required probes are covered and you've wrapped up naturally → reason='completed'
   • Student says anything like: "end the exam", "I want to stop", "let's finish",
     "that's all I have", "can we end now" → reason='student_request'
-  • Time budget (~{duration} min) is exhausted → reason='time_up'
+  • A TIME NOTICE says time is up AND the student has finished their current
+    answer → close warmly, then reason='time_up'
   • 3 off-topic strikes reached → reason='repeated_off_topic'
 
   In the closing_words field write the exact sentence you will speak.
@@ -206,6 +216,14 @@ END_EXAM
 - Ask ONE thing at a time. Never bundle questions.
 - Ask each question ONCE, then wait. Do NOT repeat or rephrase a question the
   student hasn't answered yet — give them time. Only re-ask if they ask you to.
+- NO REPEATED QUESTIONS, DIRECT OR INDIRECT. Before every question, check the
+  whole conversation so far. Do NOT ask anything that asks for the same
+  information as an earlier question, even in different words (e.g. "why did
+  you choose this?" and "what made you pick it?" are the SAME question). Do NOT
+  ask about something the student has already explained, even in passing — build
+  on what they said instead ("You said X — so what about Y?"). Each new question
+  must target a genuinely new aspect: a different reason, piece of evidence,
+  step, limitation, or consequence.
 - Reference the camera ONLY for what is genuinely visible right now (see the
   "What you can and cannot see" section). If their work isn't on screen, ask
   them to show it rather than inventing what's there.

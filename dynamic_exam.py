@@ -54,7 +54,7 @@ logger.info("Local Smart Turn Analyzer V3 loaded")
 
 logger.info("Loading Silero VAD...")
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.audio.vad.vad_analyzer import VADParams, VADState
 logger.info("Silero VAD loaded")
 
 logger.info("Loading pipeline components...")
@@ -64,6 +64,7 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    InputAudioRawFrame,
     InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -1025,6 +1026,97 @@ class PlaceholderFilter(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class SpeechTimingTracker(FrameProcessor):
+    """MEASUREMENT ONLY: when the student's voice actually starts and stops.
+
+    Ink-2 decides turn boundaries, but its turn.end only arrives after a
+    silence wait we cannot see — so voice-to-voice (timed from turn.end)
+    under-reports how long the student really waits. This runs a private
+    Silero VAD on the incoming audio and just records timestamps. It forwards
+    every frame first and never emits VAD or turn frames, so it cannot change
+    turn-taking. Any VAD failure disables it silently.
+    """
+
+    _PARAMS = VADParams(start_secs=0.2, stop_secs=0.2)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._vad: SileroVADAnalyzer | None = None
+        self._disabled = False
+        self._speaking = False
+        self.last_speech_start: float | None = None
+        self.last_speech_end: float | None = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)  # forward first: adds no delay
+        if self._disabled or not isinstance(frame, InputAudioRawFrame):
+            return
+        try:
+            if self._vad is None:
+                self._vad = SileroVADAnalyzer(sample_rate=frame.sample_rate, params=self._PARAMS)
+                self._vad.set_sample_rate(frame.sample_rate)
+            state = await self._vad.analyze_audio(frame.audio)
+        except Exception as e:
+            self._disabled = True
+            logger.warning(f"SpeechTimingTracker disabled (real-wait metric off): {e}")
+            return
+        speaking = state in (VADState.SPEAKING, VADState.STOPPING)
+        now = time.time()
+        if speaking and not self._speaking:
+            self.last_speech_start = now - self._PARAMS.start_secs
+        elif not speaking and self._speaking:
+            self.last_speech_end = now - self._PARAMS.stop_secs
+        self._speaking = speaking
+
+
+class TurnTimingObserver(BaseObserver):
+    """MEASUREMENT ONLY: logs the real wait per turn and counts cut-offs.
+
+      [LATENCY] real wait: student's actual last word -> examiner audio, and
+                how much of it was Ink-2's end-of-turn silence wait.
+      [TURN] cut-off: the examiner took the turn while the student was not
+                done — they kept talking after turn.end, or started talking
+                within CUTOFF_WINDOW_S of the examiner beginning to speak.
+    """
+
+    CUTOFF_WINDOW_S = 2.0
+
+    def __init__(self, tracker: SpeechTimingTracker, **kwargs):
+        super().__init__(observe_every_push=False, **kwargs)
+        self._tracker = tracker
+        self._turn_end: float | None = None
+        self._bot_started_at: float | None = None
+
+    async def on_push_frame(self, data: FramePushed):
+        frame = data.frame
+        now = time.time()
+        if isinstance(frame, UserStoppedSpeakingFrame) and not isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._turn_end = now
+        elif isinstance(frame, UserStartedSpeakingFrame) and not isinstance(frame, VADUserStartedSpeakingFrame):
+            if self._bot_started_at is not None and now - self._bot_started_at <= self.CUTOFF_WINDOW_S:
+                logger.info(
+                    f"[TURN] cut-off: student spoke over the examiner "
+                    f"{(now - self._bot_started_at) * 1000:.0f} ms after it began"
+                )
+                self._bot_started_at = None
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            if self._turn_end is not None:
+                start, end = self._tracker.last_speech_start, self._tracker.last_speech_end
+                clean_end = end is not None and (start is None or end >= start)
+                if start is not None and start > self._turn_end:
+                    logger.info("[TURN] cut-off: student kept talking after the turn was ended")
+                elif clean_end and end <= self._turn_end + 0.05 and self._turn_end - end < 30:
+                    logger.info(
+                        f"[LATENCY] real wait: {(now - end) * 1000:.0f} ms | "
+                        f"endpointing wait: {max(self._turn_end - end, 0) * 1000:.0f} ms"
+                    )
+                self._turn_end = None
+            self._bot_started_at = now
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_started_at = None
+
+
 class MarkerStripFilter(FrameProcessor):
     """Belt-and-braces strip of ✓ / ○ / ◐ turn-completion markers from text frames.
 
@@ -1469,11 +1561,11 @@ ADVANCE_PROBE_SCHEMA = {
     },
     "topics_raised": {
         "type": "array", "items": {"type": "string"},
-        "description": "Themes the student mentioned in this response",
+        "description": "Themes the student mentioned in this response — at most 3, each 1-4 words",
     },
     "topics_missing": {
         "type": "array", "items": {"type": "string"},
-        "description": "Important themes from the exam NOT yet discussed",
+        "description": "Important themes from the exam NOT yet discussed — at most 3, each 1-4 words",
     },
     "recommended_next": {
         "type": "string",
@@ -1482,8 +1574,8 @@ ADVANCE_PROBE_SCHEMA = {
     "gold_moment": {
         "type": "string",
         "description": (
-            "A specific, vivid idea the student said worth following up. "
-            "Empty string if nothing stands out."
+            "A specific, vivid idea the student said worth following up, in at "
+            "most 15 words. Empty string if nothing stands out."
         ),
     },
     "student_struggling": {
@@ -1500,7 +1592,7 @@ ADVANCE_PROBE_SCHEMA = {
     },
     "vague_terms": {
         "type": "array", "items": {"type": "string"},
-        "description": "Imprecise words or phrases the student used",
+        "description": "Imprecise words or phrases the student used — at most 3",
     },
 }
 
@@ -4207,8 +4299,10 @@ async def run_bot(
     # bargein_guard = BargeinGuard()
     # placeholder_filter = PlaceholderFilter()
 
+    speech_timing = SpeechTimingTracker()   # measurement only — see class doc
     pipeline = Pipeline([
         transport.input(),
+        speech_timing,
         rtvi,
         stt,
         # latency_tracker,             # observability — was emitting no logs
@@ -4283,6 +4377,7 @@ async def run_bot(
         observers=[
             RTVIObserver(rtvi), metrics_logger, latency_observer,
             UsageCollectorObserver(session_usage),
+            TurnTimingObserver(speech_timing),
         ],
     )
 

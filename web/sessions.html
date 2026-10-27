@@ -587,6 +587,14 @@ function renderDetail(t) {
       <div class="stat"><div class="label">Total cost</div>
         <div class="value">${fmtUsd(t.cost && t.cost.total_usd)}</div></div>
       <div class="stat"><div class="label">Turns</div><div class="value">${summary.turn_count ?? '—'}</div></div>
+      ${summary.median_real_wait_ms != null ? `
+      <div class="stat"><div class="label" title="Student's actual last word → examiner starts speaking">Median real wait</div>
+        <div class="value ${v2vClass(summary.median_real_wait_ms)}">${fmtMs(summary.median_real_wait_ms)}</div></div>
+      <div class="stat"><div class="label" title="Part of the wait spent deciding the student had finished">Median end-of-turn wait</div>
+        <div class="value">${fmtMs(summary.median_endpointing_ms)}</div></div>` : ''}
+      ${summary.cutoff_count != null ? `
+      <div class="stat"><div class="label" title="Examiner took the turn while the student wasn't finished">Cut-offs</div>
+        <div class="value ${summary.cutoff_count > 0 ? 'warn' : 'good'}">${summary.cutoff_count}</div></div>` : ''}
       <div class="stat"><div class="label">Median V2V</div>
         <div class="value ${v2vClass(summary.median_v2v_ms)}">${fmtMs(summary.median_v2v_ms)}</div></div>
       <div class="stat"><div class="label">Worst V2V</div>
@@ -604,7 +612,7 @@ function renderDetail(t) {
     ${renderCost(t.cost)}
 
     <div class="section">
-      <h2>Voice-to-voice latency per turn</h2>
+      <h2>${summary.median_real_wait_ms != null ? "Real wait per turn · student's last word → examiner speaks" : 'Voice-to-voice latency per turn'}</h2>
       <div class="latency-chart" id="latency-chart"></div>
       <div class="legend">
         <div class="item"><div class="swatch" style="background:var(--good)"></div>single-call</div>
@@ -685,7 +693,10 @@ function renderLatencyChart(t) {
   }
   const W = 760, H = 200, padL = 50, padR = 14, padT = 14, padB = 30;
   const innerW = W - padL - padR, innerH = H - padT - padB;
-  const maxMs = Math.max(7000, ...turns.map(x => x.voice_to_voice_ms || 0));
+  // Real wait (from the student's actual last word) when recorded; older
+  // sessions only have voice-to-voice (from the app's end-of-turn decision).
+  const waitOf = (x) => x.real_wait_ms ?? x.voice_to_voice_ms ?? 0;
+  const maxMs = Math.max(7000, ...turns.map(waitOf));
   const barW = Math.max(8, innerW / Math.max(turns.length, 1) - 6);
   const stepX = innerW / Math.max(turns.length, 1);
   const colorFor = (k) => k === 'single-call' ? '#7ec99a' : k === 'two-call' ? '#d4a574' : k === 'slack-hit' ? '#e07070' : '#6b6d75';
@@ -698,13 +709,13 @@ function renderLatencyChart(t) {
   }).join('');
 
   const bars = turns.map((tn, i) => {
-    const v = tn.voice_to_voice_ms || 0;
+    const v = waitOf(tn);
     const x = padL + i * stepX + (stepX - barW) / 2;
     const h = (v / maxMs) * innerH;
     const y = padT + innerH - h;
     return `<g>
       <rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${colorFor(tn.classification)}" opacity="0.85">
-        <title>Turn ${i}: ${v}ms · ${tn.classification}${tn.function_calls.length ? ' · fn:' + tn.function_calls.join(',') : ''}</title>
+        <title>Turn ${i}: ${v}ms${tn.real_wait_ms != null ? ` real wait (end-of-turn wait ${tn.endpointing_ms}ms, V2V ${tn.voice_to_voice_ms}ms)` : ''} · ${tn.classification}${tn.function_calls.length ? ' · fn:' + tn.function_calls.join(',') : ''}</title>
       </rect>
       <text x="${x + barW / 2}" y="${padT + innerH + 14}" text-anchor="middle" fill="#6b6d75" font-size="9">${i}</text>
     </g>`;

@@ -61,6 +61,12 @@ _RE_SLACK = re.compile(
 _RE_STARTUP = re.compile(
     rf"{_TS}\s+\|\s+INFO\s+\|.*Starting dynamic oral exam bot\s+\|\s+session=(?P<sid>\S+)\s+\|\s+llm=(?P<llm>\S+)\s+\|\s+stt=(?P<stt>\S+)"
 )
+# [LATENCY] real wait: 3200 ms | endpointing wait: 600 ms   (student's actual last word -> examiner audio)
+_RE_REAL_WAIT = re.compile(
+    rf"{_TS}\s+\|\s+INFO\s+\|.*\[LATENCY\] real wait: (?P<ms>\d+) ms \| endpointing wait: (?P<ep>\d+) ms"
+)
+# [TURN] cut-off: ...   (examiner took the turn while the student was not done)
+_RE_CUTOFF = re.compile(rf"{_TS}\s+\|\s+INFO\s+\|.*\[TURN\] cut-off")
 # Turn detection: mode=off | native endpointing (markers OFF) | stt=cartesia-ink-2
 _RE_TURN_MODE = re.compile(
     rf"{_TS}\s+\|\s+INFO\s+\|.*Turn detection:\s+mode=(?P<mode>\S+)"
@@ -117,6 +123,8 @@ class Turn:
     slack_events_ms: list[float] = field(default_factory=list)
     classification: str = "single-call"   # "single-call" | "two-call" | "slack-hit" | "incomplete"
     raw_calls: list[dict[str, Any]] = field(default_factory=list)  # raw LLM I/O records from llm_calls/*.jsonl
+    real_wait_ms: int | None = None      # student's actual last word -> examiner audio
+    endpointing_ms: int | None = None    # part of real_wait spent waiting for Ink-2's turn end
 
 
 @dataclass
@@ -170,6 +178,8 @@ def _scan_log(log_path: Path) -> dict[str, Any]:
         "v2vs": [],           # (ts_secs, ts_str, ms)
         "breakdowns": [],     # (ts_secs, ts_str, parts_str)
         "slacks": [],         # (ts_secs, ts_str, ms)
+        "real_waits": [],     # (ts_secs, ts_str, ms, endpointing_ms)
+        "cutoffs": [],        # (ts_secs, ts_str)
     }
     try:
         text = log_path.read_text(errors="replace")
@@ -201,6 +211,12 @@ def _scan_log(log_path: Path) -> dict[str, Any]:
         elif m := _RE_LATENCY_BREAKDOWN.search(line):
             ts = m.group(1)
             out["breakdowns"].append((_ts_to_seconds(ts), ts, m.group("parts")))
+        elif m := _RE_REAL_WAIT.search(line):
+            ts = m.group(1)
+            out["real_waits"].append((_ts_to_seconds(ts), ts, int(m.group("ms")), int(m.group("ep"))))
+        elif m := _RE_CUTOFF.search(line):
+            ts = m.group(1)
+            out["cutoffs"].append((_ts_to_seconds(ts), ts))
         elif m := _RE_SLACK.search(line):
             ts = m.group(1)
             out["slacks"].append((_ts_to_seconds(ts), ts, float(m.group("ms"))))
@@ -492,6 +508,12 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
             near_secs, _, near_ms = min(v2v_events, key=lambda e: abs(e[0] - secs))
             if abs(near_secs - secs) <= 0.5:
                 v2v_ms = near_ms
+        # Real wait is logged at the same moment (examiner starts speaking).
+        real_wait_ms = endpointing_ms = None
+        if scan["real_waits"]:
+            rw_secs, _, rw_ms, rw_ep = min(scan["real_waits"], key=lambda e: abs(e[0] - secs))
+            if abs(rw_secs - secs) <= 0.5:
+                real_wait_ms, endpointing_ms = rw_ms, rw_ep
         # Classification rules:
         # - two-call if there were >=2 LLM TTFB events OR a function call fired
         #   (covers the Gemini case where TTFB metric is deferred and the
@@ -525,6 +547,8 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
             slack_events_ms=bracket_slacks,
             classification=classification,
             raw_calls=bracket_raw_calls,
+            real_wait_ms=real_wait_ms,
+            endpointing_ms=endpointing_ms,
         )
         timeline.turns.append(turn)
         prior_secs = secs
@@ -564,6 +588,15 @@ def build_timeline(session_id: str) -> SessionTimeline | None:
         "min_v2v_ms": min(v2vs) if v2vs else None,
         "summarization_count": len(timeline.summarization_events),
     }
+    real = sorted(t.real_wait_ms for t in timeline.turns if t.real_wait_ms is not None)
+    eps = sorted(t.endpointing_ms for t in timeline.turns if t.endpointing_ms is not None)
+    timeline.summary.update({
+        "median_real_wait_ms": real[len(real) // 2] if real else None,
+        "max_real_wait_ms": real[-1] if real else None,
+        "median_endpointing_ms": eps[len(eps) // 2] if eps else None,
+        # None for older sessions recorded before cut-off tracking existed.
+        "cutoff_count": len(scan["cutoffs"]) if real or scan["cutoffs"] else None,
+    })
     timeline.summary["duration_seconds"] = _session_duration(
         report_path, timeline.started_at, timeline.ended_at
     )

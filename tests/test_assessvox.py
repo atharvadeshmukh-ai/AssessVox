@@ -347,3 +347,110 @@ def test_concurrent_exams_write_separate_logs(tmp_path):
         text = path.read_text()
         assert text.count(own) == 7
         assert other not in text
+
+
+# ─── Real wait / cut-offs (measurement only) ──────────────────────────────────
+
+
+def _run_turn(speech_start, speech_end, events):
+    """Feed timed frames to TurnTimingObserver; return what it logged."""
+    from loguru import logger
+
+    logs = []
+    sink = logger.add(lambda m: logs.append(m.record["message"]), level="INFO",
+                      filter=lambda r: "[TURN]" in r["message"] or "real wait" in r["message"])
+    tracker = de.SpeechTimingTracker()
+    tracker.last_speech_start, tracker.last_speech_end = speech_start, speech_end
+    observer = de.TurnTimingObserver(tracker)
+    clock = [0.0]
+    real_time = de.time.time
+    de.time.time = lambda: clock[0]
+
+    class Pushed:
+        def __init__(self, frame):
+            self.frame = frame
+
+    async def run():
+        for t, frame in events:
+            clock[0] = t
+            await observer.on_push_frame(Pushed(frame))
+
+    try:
+        asyncio.run(run())
+    finally:
+        de.time.time = real_time
+        logger.remove(sink)
+    return logs
+
+
+def test_real_wait_counts_from_students_last_word():
+    from pipecat.frames.frames import BotStartedSpeakingFrame, UserStoppedSpeakingFrame
+    logs = _run_turn(7.0, 10.0, [(10.6, UserStoppedSpeakingFrame()), (13.2, BotStartedSpeakingFrame())])
+    assert logs == ["[LATENCY] real wait: 3200 ms | endpointing wait: 600 ms"]
+
+
+def test_talking_over_the_examiner_is_a_cutoff():
+    from pipecat.frames.frames import (BotStartedSpeakingFrame, UserStartedSpeakingFrame,
+                                       UserStoppedSpeakingFrame)
+    logs = _run_turn(7.0, 10.0, [(10.6, UserStoppedSpeakingFrame()), (13.2, BotStartedSpeakingFrame()),
+                                 (14.0, UserStartedSpeakingFrame())])
+    assert any("cut-off: student spoke over the examiner 800 ms" in line for line in logs)
+
+
+def test_answering_after_examiner_finishes_is_not_a_cutoff():
+    from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame,
+                                       UserStartedSpeakingFrame, UserStoppedSpeakingFrame)
+    logs = _run_turn(7.0, 10.0, [(10.6, UserStoppedSpeakingFrame()), (13.2, BotStartedSpeakingFrame()),
+                                 (15.0, BotStoppedSpeakingFrame()), (16.0, UserStartedSpeakingFrame())])
+    assert not any("cut-off" in line for line in logs)
+
+
+def test_resuming_after_turn_end_is_a_cutoff():
+    from pipecat.frames.frames import BotStartedSpeakingFrame, UserStoppedSpeakingFrame
+    logs = _run_turn(11.0, 10.0, [(10.6, UserStoppedSpeakingFrame()), (13.2, BotStartedSpeakingFrame())])
+    assert logs == ["[TURN] cut-off: student kept talking after the turn was ended"]
+
+
+def test_speech_tracker_never_blocks_frames():
+    from pipecat.frames.frames import InputAudioRawFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    tracker = de.SpeechTimingTracker()
+    forwarded = []
+
+    async def push(frame, direction=None):
+        forwarded.append(frame)
+
+    async def skip_base(self, f, d):
+        return None
+
+    # Unsupported audio (Silero only takes 8/16 kHz) must switch tracking off,
+    # never drop or delay the frame.
+    frame = InputAudioRawFrame(audio=b"\x00\x00" * 160, sample_rate=11025, num_channels=1)
+    tracker.push_frame = push
+    original = de.FrameProcessor.process_frame
+    de.FrameProcessor.process_frame = skip_base
+    try:
+        asyncio.run(tracker.process_frame(frame, FrameDirection.DOWNSTREAM))
+    finally:
+        de.FrameProcessor.process_frame = original
+    assert forwarded == [frame]
+    assert tracker._disabled
+
+
+def test_dashboard_reads_real_wait_and_cutoffs(tmp_path, monkeypatch):
+    sid = "20990101_000000_test01"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / f"session_{sid}.log").write_text("\n".join([
+        "2099-01-01 00:00:01.000 | INFO     | dynamic_exam:run_bot:1 - Starting dynamic oral exam bot | session=x | llm=anthropic:claude-haiku-5-5 | stt=cartesia-ink-2",
+        "2099-01-01 00:00:10.000 | INFO     | dynamic_exam:a:1 - [LATENCY] voice-to-voice: 2600 ms",
+        "2099-01-01 00:00:10.001 | INFO     | dynamic_exam:a:1 - [LATENCY] real wait: 3200 ms | endpointing wait: 600 ms",
+        "2099-01-01 00:00:10.002 | INFO     | dynamic_exam:a:1 - [LATENCY] breakdown: _DumpingAnthropicLLMService#0=900ms | FallbackCartesiaTTSService#0=250ms",
+        "2099-01-01 00:00:11.000 | INFO     | dynamic_exam:a:1 - [TURN] cut-off: student spoke over the examiner 800 ms after it began",
+    ]), encoding="utf-8")
+    monkeypatch.setattr(session_timeline, "LOGS_DIR", logs)
+    t = session_timeline.build_timeline(sid)
+    assert t.turns[0].voice_to_voice_ms == 2600
+    assert t.turns[0].real_wait_ms == 3200 and t.turns[0].endpointing_ms == 600
+    assert t.summary["median_real_wait_ms"] == 3200 and t.summary["cutoff_count"] == 1
